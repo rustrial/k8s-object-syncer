@@ -1,0 +1,4 @@
+.cr-release-packages
+.kube-config
+.dccache
+target

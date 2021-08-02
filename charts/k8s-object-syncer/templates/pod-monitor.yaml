@@ -1,0 +1,21 @@
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "k8s-object-syncer.fullname" . }}
+  labels:
+    {{- include "k8s-object-syncer.labels" . | nindent 4 }}
+spec:
+  jobLabel: {{ include "k8s-object-syncer.fullname" . }}
+  namespaceSelector:
+    matchNames:
+      - "{{ $.Release.Namespace }}"
+  selector:
+    matchLabels:
+      {{- include "k8s-object-syncer.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - interval: "{{ .Values.podMonitor.interval }}"
+      path: /metrics
+      port: metrics
+      scrapeTimeout: "{{ .Values.podMonitor.scrapeTimeout }}"
+{{- end }}

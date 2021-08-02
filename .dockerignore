@@ -1,0 +1,9 @@
+Dockerfile
+target
+charts
+.dccache
+.dockerignore
+.github
+.kube-config
+*.md
+local-test.sh

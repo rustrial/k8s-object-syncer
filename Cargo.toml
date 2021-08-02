@@ -1,0 +1,2 @@
+[workspace]
+members = ["rustrial-k8s-object-syncer-apis", "rustrial-k8s-object-syncer"]
