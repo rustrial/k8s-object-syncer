@@ -21,7 +21,10 @@
 | `serviceAccount.create`                    | Whether to create a `ServiceAccount` or not.                                       | `true`                                                     | no        |
 | `serviceAccount.annotations`               |                                                                                    | `{}`                                                       | no        |
 | `serviceAccount.name`                      |                                                                                    | `""`                                                       | no        |
-| `podAnnotations`                           |                                                                                    | `{}`                                                       | no        |
+| `podAnnotations`                           | Extra Pod annotations                                                              | `{}`                                                       | no        |
+| `podLabels`                                | Extra Pod labels                                                                   | `{}`                                                       | no        |
+| `deploymentAnnotations`                    | Extra Deployment annotations                                                       | `{}`                                                       | no        |
+| `deploymentLabels`                         | Extra Deployment labels                                                            | `{}`                                                       | no        |
 | `podSecurityContext`                       |                                                                                    | `{}`                                                       | no        |
 | `securityContext.capabilities.drop`        |                                                                                    | `["ALL"]`                                                  | no        |
 | `securityContext.allowPrivilegeEscalation` |                                                                                    | `false`                                                    | no        |
@@ -33,7 +36,7 @@
 | `resources.limits.memory`                  |                                                                                    | `64Mi`                                                     | no        |
 | `resources.requests.cpu`                   |                                                                                    | `10m`                                                      | no        |
 | `resources.requests.memory`                |                                                                                    | `32Mi`                                                     | no        |
-| `extraEnv`                                 |                                                                                    | `[]`                                                       | no        |
+| `extraEnv`                                 | Extra environment variables to pass to the object syncer container                 | `[]`                                                       | no        |
 | `podMonitor.enabled`                       | Whether to create a `PodMonitor` or not.                                           | `false`                                                    | no        |
 | `podMonitor.interval`                      | `PodMonitor` scrape interval                                                       | `60s`                                                      | no        |
 | `podMonitor.scrapeTimeout`                 | `PodMonitor` scrape timeout                                                        | `10s`                                                      | no        |

@@ -4,6 +4,13 @@ metadata:
   name: {{ include "k8s-object-syncer.fullname" . }}
   labels:
     {{- include "k8s-object-syncer.labels" . | nindent 4 }}
+  {{- with .Values.deploymentLabels }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  annotations:
+  {{- with .Values.deploymentAnnotations }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: 1
   selector:
@@ -19,6 +26,9 @@ spec:
       {{- end }}
       labels:
         {{- include "k8s-object-syncer.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
