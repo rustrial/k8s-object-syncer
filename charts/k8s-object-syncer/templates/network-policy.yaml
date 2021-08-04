@@ -1,0 +1,11 @@
+{{- if .Values.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "k8s-object-syncer.fullname" . }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "k8s-object-syncer.selectorLabels" . | nindent 6 }}
+  {{- toYaml .Values.networkPolicy | nindent 2 }}
+{{- end }}

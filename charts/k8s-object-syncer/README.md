@@ -40,6 +40,9 @@
 | `podMonitor.enabled`                       | Whether to create a `PodMonitor` or not.                                           | `false`                                                    | no        |
 | `podMonitor.interval`                      | `PodMonitor` scrape interval                                                       | `60s`                                                      | no        |
 | `podMonitor.scrapeTimeout`                 | `PodMonitor` scrape timeout                                                        | `10s`                                                      | no        |
+| `metrics.address`                          | IPv4 or IPv6 address to listen for metrics request                                 | `0.0.0.0` (listen on all network interfaces)               | no        |
+| `metrics.port`                             | TCP port to listen for metrics requests                                            | `9000`                                                     | no        |
+| `networkPolicy`                            | NetworkPolicy content (`ingress`, `egress` and `policyTypes`)                      | `null`                                                     | no        |
 
 
 ## Installation
@@ -115,4 +118,31 @@ targetNamespaces: ["*"]
 allowedResources:
 - apiGroups: ["*"]
   resources: ["*"]
+```
+
+---
+
+Set NetworkPolicy.
+
+```yaml
+networkPolicy:
+  ingress:
+    # Allow all ingress to metrics port
+    - from:
+        - namespaceSelector: {}
+          podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9000
+  egress:
+    - ports: # Kubernetes API
+        - protocol: TCP
+          port: 443
+        - port: 53 # DNS
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+  policyTypes:
+    - Ingress
+    - Egress
 ```

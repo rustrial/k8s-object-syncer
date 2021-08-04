@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use hyper::{
     header::CONTENT_TYPE,
@@ -29,9 +29,9 @@ async fn serve_req(
 }
 
 pub(crate) async fn start_prometheus_metrics_server(
+    addr: SocketAddr,
     prometheus_metrics_exporter: PrometheusExporter,
 ) {
-    let addr = ([127, 0, 0, 1], 9000).into();
     debug!("Listening on http://{}", addr);
     let exporter = Arc::new(prometheus_metrics_exporter);
     let handler = make_service_fn(move |_| {

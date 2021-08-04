@@ -91,8 +91,12 @@ async fn ok<T, E>(_: T) -> Result<(), E> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    let metrics_addr = env_var("METRICS_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0".to_string());
+    let metrics_port = env_var("METRICS_LISTEN_PORT").unwrap_or_else(|| "9000".to_string());
+    let metrics_addr = format!("{}:{}", metrics_addr, metrics_port).parse()?;
     let prometheus_metrics_exporter = opentelemetry_prometheus::exporter().init();
-    let prometheus_metrics_exporter = start_prometheus_metrics_server(prometheus_metrics_exporter);
+    let prometheus_metrics_exporter =
+        start_prometheus_metrics_server(metrics_addr, prometheus_metrics_exporter);
     let client = Client::try_default().await?;
     let namespace_watcher = watcher(Api::<Namespace>::all(client.clone()), ListParams::default());
     let writer: Writer<Namespace> = Default::default();

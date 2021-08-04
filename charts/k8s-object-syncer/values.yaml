@@ -88,7 +88,32 @@ allowedResources:
 
 extraEnv: []
 
+metrics:
+  port: 9000
+  address: "0.0.0.0"
+
 podMonitor:
   enabled: false
   interval: 60s
   scrapeTimeout: 10s
+
+networkPolicy:
+  # ingress:
+  #   # Allow all ingress to metrics port
+  #   - from:
+  #       - namespaceSelector: {}
+  #         podSelector: {}
+  #     ports:
+  #       - protocol: TCP
+  #         port: 9000
+  # egress:
+  #   - ports: # Kubernetes API
+  #       - protocol: TCP
+  #         port: 443
+  #       - port: 53 # DNS
+  #         protocol: UDP
+  #       - port: 53
+  #         protocol: TCP
+  # policyTypes:
+  #   - Ingress
+  #   - Egress

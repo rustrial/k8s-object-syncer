@@ -20,7 +20,7 @@ spec:
     metadata:
       annotations:
         prometheus.io/scrape: 'true'
-        prometheus.io/port: '9000'
+        prometheus.io/port: "{{ .Values.metrics.port | default 9000 }}"
       {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -57,13 +57,21 @@ spec:
             - name: TARGET_NAMESPACES
               value: "{{ .Values.targetNamespaces | join "," }}"
           {{- end }}
+          {{- if .Values.metrics.address }}
+            - name: METRICS_LISTEN_ADDR
+              value: "{{ .Values.metrics.address }}"
+          {{- end }}
+          {{- if .Values.metrics.port }}
+            - name: METRICS_LISTEN_PORT
+              value: "{{ .Values.metrics.port }}"
+          {{- end }}
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: metrics
-              containerPort: 9000
+              containerPort: {{ .Values.metrics.port | default 9000 }}
               protocol: TCP
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
