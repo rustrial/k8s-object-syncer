@@ -219,12 +219,22 @@ impl ResourceControllerImpl {
             let mut tmp: Vec<(String, String)> = Default::default();
             if d.applies_to_all_namespaces() {
                 for ns in cache.iter() {
-                    if let Some(x) = d.applies_to(event, ns.name().as_str()) {
-                        tmp.push(x);
+                    // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
+                    // destination objects will prevent the namespace from being deleted.
+                    if ns.metadata.deletion_timestamp.is_none() {
+                        if let Some(x) = d.applies_to(event, ns.name().as_str()) {
+                            tmp.push(x);
+                        }
                     }
                 }
             } else if let Some(x) = d.applies_to(event, d.namespace.as_str()) {
-                tmp.push(x);
+                if let Some(ns) = cache.iter().find(|ns| ns.name() == d.namespace) {
+                    // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
+                    // destination objects will prevent the namespace from being deleted.
+                    if ns.metadata.deletion_timestamp.is_none() {
+                        tmp.push(x);
+                    }
+                }
             }
             tmp
         })
@@ -253,7 +263,7 @@ impl ResourceControllerImpl {
                 source.name()
             ),
         );
-        let mut upserted = 0usize;
+        let mut changed = false;
         let mut pp = PostParams::default();
         pp.field_manager = Some(MANAGER.to_string());
 
@@ -285,7 +295,23 @@ impl ResourceControllerImpl {
             while retry_attempts > 0 {
                 retry_attempts -= 1;
                 match api.get(d.name.as_str()).await {
-                    Ok(current) => {
+                    Ok(mut current) => {
+                        if current.metadata.deletion_timestamp.is_some() {
+                            // If a destination object has been deleted, remove the finalizer to make sure
+                            // it gets properly removed by the API server and that we can recreate and sync
+                            // it.
+                            match remove_finalizer(api.clone(), &mut current, FINALIZER).await {
+                                Ok(true) => debug!(
+                                    "removed finalizer from deleted object {} {}/{}",
+                                    self.gvk.kind, d.namespace, d.name
+                                ),
+                                Err(e) => warn!(
+                                    "failed to remove finalizer from deleted object {} {}/{}: {}",
+                                    self.gvk.kind, d.namespace, d.name, e
+                                ),
+                                _ => (),
+                            }
+                        }
                         let dst_version = ObjectRevision {
                             uid: current.uid(),
                             resource_version: current.resource_version(),
@@ -302,7 +328,7 @@ impl ResourceControllerImpl {
                                         resource_version: updated.resource_version(),
                                     });
                                     d.source_version = Some(src_version.clone());
-                                    upserted += 1;
+                                    changed = true;
                                     observed_success += 1;
                                     break;
                                 }
@@ -333,7 +359,7 @@ impl ResourceControllerImpl {
                                 resource_version: created.resource_version(),
                             });
                             d.source_version = Some(src_version.clone());
-                            upserted += 1;
+                            changed = true;
                             observed_success += 1;
                             break;
                         }
@@ -362,7 +388,7 @@ impl ResourceControllerImpl {
                 }
             }
         }
-        Ok((upserted > 0, expected_success, observed_success))
+        Ok((changed, expected_success, observed_success))
     }
 
     fn is_same_destination(me: &DestinationStatus, other: &DestinationStatus) -> bool {
@@ -403,7 +429,9 @@ impl ResourceControllerImpl {
             expected_destinations.push(expected_dst);
         }
         // 1. Remove stale destinations.
+        let stales = stale_destinations.len();
         let stale_remnants = delete_destinations(self.client(), &stale_destinations).await?;
+        let removed_count = stales - stale_remnants.len();
         // 2. Update status sub-resources with active destinations.
         //    Deterministically sort destinations to avoid unnecessary updates.
         //    Note, it is important that we update the status sub-resource before
@@ -420,7 +448,7 @@ impl ResourceControllerImpl {
                 let (updated, expected, observed) = self
                     .upsert_destinations(&source, destinations, &stale_remnants)
                     .await?;
-                if updated {
+                if updated || removed_count > 0 {
                     let errors = expected - observed;
                     Some(Condition::new(
                         IN_SYNC,
@@ -641,7 +669,7 @@ impl ResourceControllerImpl {
                     });
                     if let Some(ct) = &namespace.metadata.creation_timestamp {
                         let age = Utc::now() - ct.0;
-                        if is_target_namespace && age.num_seconds() > 300 {
+                        if is_target_namespace && age.num_seconds() < 300 {
                             // reconcile all source if namespace has been created in the last 5 minutes.
                             let guard = futures::executor::block_on(sources.read());
                             let tmp: Vec<ObjectRef<DynamicObject>> = guard

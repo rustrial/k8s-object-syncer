@@ -129,6 +129,8 @@ impl Destination {
         self.namespace.as_str() == namespace || self.applies_to_all_namespaces()
     }
 
+    /// Check whether this [`Destination`] applies to given namespace and if so
+    /// returns a tuple `(namespace,name)`.
     pub fn applies_to(&self, obj: &ObjectSync, namespace: &str) -> Option<(String, String)> {
         let spec: &ObjectSyncSpec = &obj.spec;
         let src_name = spec.source.name.as_str();
