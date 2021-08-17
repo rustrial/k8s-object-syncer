@@ -13,7 +13,10 @@ use futures::{
 };
 use k8s_openapi::{api::core::v1::Namespace, chrono::Utc};
 use kube::{
-    api::{ApiResource, DynamicObject, GroupVersionKind, ListParams, PostParams, TypeMeta},
+    api::{
+        ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams,
+        TypeMeta,
+    },
     Api, Client, ResourceExt,
 };
 use kube_runtime::{
@@ -27,7 +30,8 @@ use opentelemetry::{
     KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{
-    Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, API_GROUP,
+    Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, SyncStrategy,
+    API_GROUP,
 };
 use std::{
     borrow::BorrowMut,
@@ -212,27 +216,27 @@ impl ResourceControllerImpl {
     fn expected_destinations<'a>(
         &self,
         event: &'a ObjectSyncModifications,
-    ) -> impl Iterator<Item = (String, String)> + 'a {
+    ) -> impl Iterator<Item = (String, String, Option<SyncStrategy>)> + 'a {
         let spec: &ObjectSyncSpec = &event.spec;
         let cache = self.namespace_cache.state();
         spec.destinations.iter().flat_map(move |d| {
-            let mut tmp: Vec<(String, String)> = Default::default();
+            let mut tmp: Vec<(String, String, Option<SyncStrategy>)> = Default::default();
             if d.applies_to_all_namespaces() {
                 for ns in cache.iter() {
                     // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
                     // destination objects will prevent the namespace from being deleted.
                     if ns.metadata.deletion_timestamp.is_none() {
-                        if let Some(x) = d.applies_to(event, ns.name().as_str()) {
-                            tmp.push(x);
+                        if let Some((ns, name)) = d.applies_to(event, ns.name().as_str()) {
+                            tmp.push((ns, name, d.strategy));
                         }
                     }
                 }
-            } else if let Some(x) = d.applies_to(event, d.namespace.as_str()) {
+            } else if let Some((namespace, name)) = d.applies_to(event, d.namespace.as_str()) {
                 if let Some(ns) = cache.iter().find(|ns| ns.name() == d.namespace) {
                     // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
                     // destination objects will prevent the namespace from being deleted.
                     if ns.metadata.deletion_timestamp.is_none() {
-                        tmp.push(x);
+                        tmp.push((namespace, name, d.strategy));
                     }
                 }
             }
@@ -280,8 +284,6 @@ impl ResourceControllerImpl {
             }
             template.metadata.namespace = Some(d.namespace.clone());
             template.metadata.name = Some(d.name.clone());
-            template.metadata.uid = Default::default();
-            template.metadata.resource_version = Default::default();
             template.metadata.generation = Default::default();
             template.metadata.generate_name = Default::default();
             template.metadata.managed_fields = Default::default();
@@ -293,6 +295,8 @@ impl ResourceControllerImpl {
             let api = self.namespaced_api(d.namespace.as_str());
             let mut retry_attempts = 3i32;
             while retry_attempts > 0 {
+                template.metadata.uid = Default::default();
+                template.metadata.resource_version = Default::default();
                 retry_attempts -= 1;
                 match api.get(d.name.as_str()).await {
                     Ok(mut current) => {
@@ -317,11 +321,24 @@ impl ResourceControllerImpl {
                             resource_version: current.resource_version(),
                         };
                         if &Some(dst_version) != &d.synced_version
-                            || &Some(src_version.clone()) != &d.source_version
+                            || &Some(&src_version) != &d.source_version.as_ref()
                         {
                             template.metadata.uid = current.uid();
                             template.metadata.resource_version = current.resource_version();
-                            match api.replace(d.name.as_str(), &pp, &template).await {
+
+                            let result = match &d.strategy() {
+                                SyncStrategy::Replace => {
+                                    api.replace(d.name.as_str(), &pp, &template).await
+                                }
+                                SyncStrategy::Apply => {
+                                    let mut pp = PatchParams::default();
+                                    pp.field_manager = Some(MANAGER.to_string());
+                                    pp.force = true;
+                                    api.patch(d.name.as_str(), &pp, &Patch::Apply(&template))
+                                        .await
+                                }
+                            };
+                            match result {
                                 Ok(updated) => {
                                     d.synced_version = Some(ObjectRevision {
                                         uid: updated.uid(),
@@ -410,8 +427,8 @@ impl ResourceControllerImpl {
             .flatten()
             .unwrap_or_default();
         let mut expected_destinations: Vec<DestinationStatus> = Default::default();
-        for (dst_namespace, dst_name) in self.expected_destinations(event) {
-            let expected_dst = DestinationStatus {
+        for (dst_namespace, dst_name, strategy) in self.expected_destinations(event) {
+            let mut expected_dst = DestinationStatus {
                 name: dst_name,
                 namespace: dst_namespace,
                 source_version: None,
@@ -419,13 +436,23 @@ impl ResourceControllerImpl {
                 group: self.gvk.group.clone(),
                 version: self.gvk.version.clone(),
                 kind: self.gvk.kind.clone(),
+                strategy,
             };
-            let expected_dst = stale_destinations
+            if let Some(status) = stale_destinations
                 .iter()
                 .find(|d| Self::is_same_destination(d, &expected_dst))
-                .map(|d| (*d).clone())
-                .unwrap_or(expected_dst);
-            stale_destinations.retain(|d| !Self::is_same_destination(d, &expected_dst));
+            {
+                // If strategy (sync config) changed do not set version to make sure the destination
+                // object is update. Note, this is required as we cannot track the ObjectSync's resourceVersion
+                // in its own status as this would lead to an infinit reconciliation cycle.
+                if status.strategy() == expected_dst.strategy() {
+                    expected_dst.source_version = status.source_version.clone();
+                    expected_dst.synced_version = status.synced_version.clone();
+                }
+                // As destination is in set of expected destinations, remove it from the set of
+                // stale destinations.
+                stale_destinations.retain(|d| !Self::is_same_destination(d, &expected_dst));
+            }
             expected_destinations.push(expected_dst);
         }
         // 1. Remove stale destinations.

@@ -108,6 +108,26 @@ pub struct SourceObject {
     pub namespace: Option<String>,
 }
 
+/// Destination object synchronization strategy.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, JsonSchema)]
+pub enum SyncStrategy {
+    /// Use [server side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/) to
+    /// manage (sync) destination objects with a shared ownership model
+    /// (only overwriting changes in fields present in source object).
+    #[serde(rename = "apply")]
+    Apply,
+    /// Use replace to manage (sync) destination objects with exclusive ownership
+    /// (overwriting all changes made by others).
+    #[serde(rename = "replace")]
+    Replace,
+}
+
+impl Default for SyncStrategy {
+    fn default() -> Self {
+        Self::Apply
+    }
+}
+
 /// Synchronization target configuration.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, JsonSchema)]
 pub struct Destination {
@@ -118,9 +138,16 @@ pub struct Destination {
     /// The destination (target) namespace, if empty `""` or `"*"` the source object
     /// is synced to all namespaces.
     pub namespace: String,
+    /// The sync strategy to use for this destination, defaults to "apply" (server side apply).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<SyncStrategy>,
 }
 
 impl Destination {
+    pub fn strategy(&self) -> SyncStrategy {
+        self.strategy.unwrap_or_default()
+    }
+
     pub fn applies_to_all_namespaces(&self) -> bool {
         self.namespace.as_str() == "" || self.namespace.as_str() == "*"
     }
@@ -196,6 +223,15 @@ pub struct DestinationStatus {
     /// The last source version syced, `None` if not yet synced.
     #[serde(skip_serializing_if = "Option::is_none", rename = "syncedVersion")]
     pub synced_version: Option<ObjectRevision>,
+    /// The [`SyncStrategy`] applied to this destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<SyncStrategy>,
+}
+
+impl DestinationStatus {
+    pub fn strategy(&self) -> SyncStrategy {
+        self.strategy.unwrap_or_default()
+    }
 }
 
 impl PartialOrd for DestinationStatus {
@@ -324,6 +360,18 @@ mod tests {
         assert_eq!(
             r#"{"source":{"group":"","kind":"ConfigMap","name":"x"},"destinations":[]}"#,
             serde_json::to_string(&p).unwrap()
+        );
+    }
+
+    #[test]
+    fn sync_strategy() {
+        assert_eq!(
+            r#""apply""#,
+            serde_json::to_string(&SyncStrategy::Apply).unwrap()
+        );
+        assert_eq!(
+            r#""replace""#,
+            serde_json::to_string(&SyncStrategy::Replace).unwrap()
         );
     }
 }

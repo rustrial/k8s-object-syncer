@@ -105,7 +105,7 @@ spec:
 kind: ObjectSync
 apiVersion: sync.rustrial.org/v1alpha1
 metadata:
-  name: my-test-config-map-distributor
+  name: my-test-secret-map-distributor
   namespace: default
 spec:
   source:
@@ -123,7 +123,7 @@ spec:
 kind: ObjectSync
 apiVersion: sync.rustrial.org/v1alpha1
 metadata:
-  name: my-test-config-map-distributor
+  name: my-test-cronjob-map-distributor
   namespace: default
 spec:
   source:
@@ -141,7 +141,7 @@ spec:
 kind: ObjectSync
 apiVersion: sync.rustrial.org/v1alpha1
 metadata:
-  name: my-test-config-map-distributor
+  name: my-test-hr-map-distributor
   namespace: default
 spec:
   source:
@@ -188,6 +188,35 @@ source object or `ObjectSync` object is deleted.
 Due do some limitations in the rust [kube-rs](https://github.com/kube-rs/kube-rs) Kubernetes library used
 by this controller, it has to add additional finalizers to all tracked source and destination objects to 
 make sure it obtains all `delete` events.
+
+---
+
+## Ownership
+
+For each destination a sync strategy can be defined, which is either 
+[sever side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/) 
+for shared ownership or *replace* for exclusive ownership. 
+By default the controller uses shared ownership (*server side apply* with the `force` flag)
+to manage sync destination objects, allowing other controllers and users to manage fields
+not set in the source object.
+
+Set the strategy to `replace` if you want the controller to take *exclusive* ownership for a destination.
+
+```yaml
+kind: ObjectSync
+apiVersion: sync.rustrial.org/v1alpha1
+metadata:
+  name: my-test-config-map-distributor
+  namespace: default
+spec:
+  source:
+    group: ""
+    kind: ConfigMap
+    name: my-namespace
+  destinations:
+  - namespace: "*"
+    strategy: "replace"
+```
 
 ---
 

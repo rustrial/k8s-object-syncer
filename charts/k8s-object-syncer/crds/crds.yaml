@@ -40,6 +40,13 @@ spec:
                       namespace:
                         description: "The destination (target) namespace, if empty `\"\"` or `\"*\"` the source object is synced to all namespaces."
                         type: string
+                      strategy:
+                        description: "The sync strategy to use for this destination, defaults to \"apply\" (server side apply)."
+                        enum:
+                          - apply
+                          - replace
+                        nullable: true
+                        type: string
                     required:
                       - namespace
                     type: object
@@ -139,6 +146,13 @@ spec:
                             nullable: true
                             type: string
                         type: object
+                      strategy:
+                        description: "The [`SyncStrategy`] applied to this destination."
+                        enum:
+                          - apply
+                          - replace
+                        nullable: true
+                        type: string
                       syncedVersion:
                         description: "The last source version syced, `None` if not yet synced."
                         nullable: true
