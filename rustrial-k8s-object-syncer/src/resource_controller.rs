@@ -305,10 +305,13 @@ impl ResourceControllerImpl {
                             // it gets properly removed by the API server and that we can recreate and sync
                             // it.
                             match remove_finalizer(api.clone(), &mut current, FINALIZER).await {
-                                Ok(true) => debug!(
-                                    "removed finalizer from deleted object {} {}/{}",
-                                    self.gvk.kind, d.namespace, d.name
-                                ),
+                                Ok(true) => {
+                                    debug!(
+                                        "removed finalizer from deleted object {} {}/{}",
+                                        self.gvk.kind, d.namespace, d.name
+                                    );
+                                    continue;
+                                }
                                 Err(e) => warn!(
                                     "failed to remove finalizer from deleted object {} {}/{}: {}",
                                     self.gvk.kind, d.namespace, d.name, e
@@ -325,7 +328,6 @@ impl ResourceControllerImpl {
                         {
                             template.metadata.uid = current.uid();
                             template.metadata.resource_version = current.resource_version();
-
                             let result = match &d.strategy() {
                                 SyncStrategy::Replace => {
                                     api.replace(d.name.as_str(), &pp, &template).await
@@ -539,6 +541,11 @@ impl ResourceControllerImpl {
         let me = ctx.get_ref();
         let namespaced_name = NamespacedName::from(&source);
 
+        let source_id = format!(
+            "{}/{}/{} {}",
+            me.gvk.group, me.gvk.version, me.gvk.kind, namespaced_name
+        );
+
         let is_source_namespace = me
             .configuration
             .source_namespaces
@@ -552,7 +559,9 @@ impl ResourceControllerImpl {
             guard.get(&namespaced_name).cloned()
         } else {
             None
-        };
+        }
+        .filter(|c| !c.is_empty());
+
         // Add type information required by server-side apply.
         source.types = Some(TypeMeta {
             api_version: me.gvk.version.clone(),
@@ -586,10 +595,7 @@ impl ResourceControllerImpl {
                         )
                         .await
                         {
-                            error!(
-                                "failed to remove finalizer from {}/{}/{} {}: {}",
-                                me.gvk.group, me.gvk.version, me.gvk.kind, namespaced_name, e
-                            );
+                            error!("failed to remove finalizer from {}: {}", source_id, e);
                         }
                     }
                 }
@@ -601,10 +607,7 @@ impl ResourceControllerImpl {
                 )
                 .await
                 {
-                    error!(
-                        "failed to add finalizer to {}/{}/{} {}: {}",
-                        me.gvk.group, me.gvk.version, me.gvk.kind, namespaced_name, e
-                    );
+                    error!("failed to add finalizer to {}: {}", source_id, e);
                 }
                 for sync_configuration in sync_configurations {
                     if let Some(mut rs) = me
@@ -612,15 +615,7 @@ impl ResourceControllerImpl {
                         .await
                     {
                         if let Err(e) = me.reconcile_source(&mut rs, &source).await {
-                            error!(
-                                "failed to reconcile {}/{}/{} {} for {}: {}",
-                                me.gvk.group,
-                                me.gvk.version,
-                                me.gvk.kind,
-                                namespaced_name,
-                                rs.id(),
-                                e
-                            );
+                            error!("failed to reconcile {} for {}: {}", source_id, rs.id(), e);
                         }
                     }
                 }
@@ -636,6 +631,10 @@ impl ResourceControllerImpl {
                 requeue_after: Some(Duration::from_secs(300)),
             })
         } else {
+            debug!(
+                "ignoring {} as it is not references by any ObjectSync instance",
+                source_id,
+            );
             // No need to requeue objects not tracked by any ObjectSync configuration.
             Ok(ReconcilerAction {
                 requeue_after: None,
@@ -654,6 +653,17 @@ impl ResourceControllerImpl {
         }
     }
 
+    /// Get an optimized API instance.
+    fn api(&self, namespaces: &Option<HashSet<String>>) -> Api<DynamicObject> {
+        match namespaces {
+            Some(namespaces) if namespaces.len() == 1 => match namespaces.iter().next() {
+                Some(ns) => Api::namespaced_with(self.client(), ns.as_str(), &self.api_resource),
+                _ => Api::all_with(self.client(), &self.api_resource),
+            },
+            _ => Api::all_with(self.client(), &self.api_resource),
+        }
+    }
+
     pub async fn start(
         self,
         reload: Receiver<()>,
@@ -663,20 +673,8 @@ impl ResourceControllerImpl {
         let api_resource = self.api_resource.clone();
         let api_resource2 = self.api_resource.clone();
         let api_resource3 = self.api_resource.clone();
-        let src_api = match &self.configuration.source_namespaces {
-            Some(hs) if hs.len() == 1 => match hs.iter().next() {
-                Some(ns) => Api::namespaced_with(self.client(), ns.as_str(), &self.api_resource),
-                None => Api::all_with(self.client(), &self.api_resource),
-            },
-            _ => Api::all_with(self.client(), &self.api_resource),
-        };
-        let dst_api = match &self.configuration.target_namespaces {
-            Some(hs) if hs.len() == 1 => match hs.iter().next() {
-                Some(ns) => Api::namespaced_with(self.client(), ns.as_str(), &self.api_resource),
-                None => Api::all_with(self.client(), &self.api_resource),
-            },
-            _ => Api::all_with(self.client(), &self.api_resource),
-        };
+        let src_api = self.api(&self.configuration.source_namespaces);
+        let dst_api = self.api(&self.configuration.target_namespaces);
         let list_params = ListParams::default();
         let controller = Controller::new_with(src_api, list_params, self.api_resource.clone());
         let sources = self.sources.clone();
@@ -691,9 +689,9 @@ impl ResourceControllerImpl {
                 Api::<Namespace>::all(self.client()),
                 ListParams::default(),
                 move |namespace| {
-                    let is_target_namespace = target_namespaces2.as_ref().map_or(true, |v| {
-                        v.is_empty() || v.contains(namespace.name().as_str()) || v.contains("*")
-                    });
+                    let is_target_namespace = target_namespaces2
+                        .as_ref()
+                        .map_or(true, |v| v.contains(namespace.name().as_str()));
                     if let Some(ct) = &namespace.metadata.creation_timestamp {
                         let age = Utc::now() - ct.0;
                         if is_target_namespace && age.num_seconds() < 300 {
@@ -736,9 +734,9 @@ impl ResourceControllerImpl {
                 lp_dst,
                 move |rs: DynamicObject| {
                     let namespace = rs.namespace().unwrap_or_else(|| "".to_string());
-                    let is_target_namespace = target_namespaces.as_ref().map_or(true, |v| {
-                        v.is_empty() || v.contains(namespace.as_str()) || v.contains("*")
-                    });
+                    let is_target_namespace = target_namespaces
+                        .as_ref()
+                        .map_or(true, |v| v.contains(namespace.as_str()));
                     if let Some(annotation) =
                         rs.annotations().get(source_object_annotation_key.as_str())
                     {

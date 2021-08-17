@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use std::{collections::HashSet, iter::FromIterator};
+use std::collections::HashSet;
 
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Namespace;
@@ -46,18 +46,30 @@ struct Configuration {
 
 impl Configuration {
     pub fn new(client: Client) -> Self {
-        let watch_namespaces: Option<Vec<String>> =
-            env_var("WATCH_NAMESPACES").map(|v| v.split(",").map(|v| v.to_string()).collect());
-        let source_namespaces: Option<HashSet<String>> =
-            env_var("SOURCE_NAMESPACES").map(|v| v.split(",").map(|v| v.to_string()).collect());
-        let target_namespaces: Option<HashSet<String>> =
-            env_var("TARGET_NAMESPACES").map(|v| v.split(",").map(|v| v.to_string()).collect());
-        let object_sync_api = if let Some([ns]) = &watch_namespaces.as_deref() {
+        fn normalize(hs: HashSet<String>) -> Option<HashSet<String>> {
+            if hs.is_empty() || hs.contains("*") || hs.contains("") {
+                None
+            } else {
+                Some(hs)
+            }
+        }
+        let watch_namespaces: Option<HashSet<String>> = env_var("WATCH_NAMESPACES")
+            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .flatten();
+        let source_namespaces: Option<HashSet<String>> = env_var("SOURCE_NAMESPACES")
+            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .flatten();
+        let target_namespaces: Option<HashSet<String>> = env_var("TARGET_NAMESPACES")
+            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .flatten();
+        let mut tmp = watch_namespaces.iter().flatten();
+        let object_sync_api = if let (Some(ns), None) = (tmp.next(), tmp.next()) {
             // Optimize for the use-case where exactly one watch-namespace is provided.
             info!("Controller is only watching resources in namespace {}", ns);
             Api::<ObjectSync>::namespaced(client.clone(), ns.as_str())
         } else {
             if let Some(namespaces) = &watch_namespaces {
+                let namespaces: Vec<&str> = namespaces.iter().map(|v| v.as_str()).collect();
                 info!(
                     "Controller is watching resources in namespaces: {}",
                     namespaces.join(",")
@@ -70,7 +82,7 @@ impl Configuration {
         Configuration {
             client: client,
             resource_sync: object_sync_api,
-            watch_namespaces: watch_namespaces.map(HashSet::from_iter),
+            watch_namespaces,
             source_namespaces,
             target_namespaces,
         }
