@@ -8,8 +8,7 @@ use k8s_openapi::api::core::v1::Namespace;
 use kube::{api::ListParams, Api, Client};
 use kube_runtime::{
     reflector::{reflector, store::Writer},
-    utils::try_flatten_applied,
-    watcher,
+    watcher, WatchStreamExt,
 };
 
 use prometheus_exporter::start_prometheus_metrics_server;
@@ -113,8 +112,9 @@ async fn main() -> anyhow::Result<()> {
     let namespace_watcher = watcher(Api::<Namespace>::all(client.clone()), ListParams::default());
     let writer: Writer<Namespace> = Default::default();
     let namespace_cache = writer.as_reader();
-    let namespace_reflector =
-        try_flatten_applied(reflector(writer, namespace_watcher)).try_for_each(ok);
+    let namespace_reflector = reflector(writer, namespace_watcher)
+        .applied_objects()
+        .try_for_each(ok);
     // ObjectSync controller
     let configuration = Configuration::new(client);
     let controller = ObjectSyncController::new(configuration, namespace_cache).start();

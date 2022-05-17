@@ -90,7 +90,11 @@ impl ObjectSyncModifications {
         let mut pp = PostParams::default();
         pp.field_manager = Some(MANAGER.to_string());
         self.modified = api
-            .replace_status(name.as_str(), &pp, serde_json::to_vec(&self.modified)?)
+            .replace_status(
+                name.as_str(),
+                &pp,
+                serde_json::to_vec(&self.modified).map_err(|e| kube::Error::SerdeError(e))?,
+            )
             .await?;
         self.original = self.modified.clone();
         Ok(())

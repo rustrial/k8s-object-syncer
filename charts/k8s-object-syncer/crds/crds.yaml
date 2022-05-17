@@ -6,8 +6,10 @@ metadata:
 spec:
   group: sync.rustrial.org
   names:
+    categories: []
     kind: ObjectSync
     plural: objectsyncs
+    shortNames: []
     singular: objectsync
   scope: Namespaced
   versions:

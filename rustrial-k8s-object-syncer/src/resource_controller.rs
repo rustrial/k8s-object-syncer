@@ -20,7 +20,7 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use kube_runtime::{
-    controller::{Context as Ctx, Controller, ReconcilerAction},
+    controller::{Action, Context as Ctx, Controller},
     reflector::{ObjectRef, Store},
 };
 use log::{debug, error, info};
@@ -291,7 +291,7 @@ impl ResourceControllerImpl {
             template.metadata.self_link = Default::default();
             template.metadata.cluster_name = Default::default();
             template.metadata.creation_timestamp = Default::default();
-            template.metadata.finalizers = vec![FINALIZER.to_string()];
+            template.metadata.finalizers = Some(vec![FINALIZER.to_string()]);
             let api = self.namespaced_api(d.namespace.as_str());
             let mut retry_attempts = 3i32;
             while retry_attempts > 0 {
@@ -534,12 +534,12 @@ impl ResourceControllerImpl {
 
     /// Controller triggers this whenever our main object or our children changed
     async fn reconcile(
-        mut source: DynamicObject,
+        source: Arc<DynamicObject>,
         ctx: Ctx<Self>,
-    ) -> Result<ReconcilerAction, ControllerError> {
+    ) -> Result<Action, ControllerError> {
         let start = Instant::now();
         let me = ctx.get_ref();
-        let namespaced_name = NamespacedName::from(&source);
+        let namespaced_name = NamespacedName::from(source.as_ref());
 
         let source_id = format!(
             "{}/{}/{} {}",
@@ -563,6 +563,7 @@ impl ResourceControllerImpl {
         .filter(|c| !c.is_empty());
 
         // Add type information required by server-side apply.
+        let mut source = source.as_ref().clone();
         source.types = Some(TypeMeta {
             api_version: me.gvk.version.clone(),
             kind: me.gvk.kind.clone(),
@@ -627,29 +628,23 @@ impl ResourceControllerImpl {
                 .record(duration.as_millis() as u64, labels);
             // Requeue objects tracked by ObjectSync configuration to make sure any
             // downstream destination drift is elminitated in an eventual consistent manner.
-            Ok(ReconcilerAction {
-                requeue_after: Some(Duration::from_secs(300)),
-            })
+            Ok(Action::requeue(Duration::from_secs(300)))
         } else {
             debug!(
                 "ignoring {} as it is not references by any ObjectSync instance",
                 source_id,
             );
             // No need to requeue objects not tracked by any ObjectSync configuration.
-            Ok(ReconcilerAction {
-                requeue_after: None,
-            })
+            Ok(Action::await_change())
         }
     }
 
     /// The controller triggers this on reconcile errors
-    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> ReconcilerAction {
-        ReconcilerAction {
-            requeue_after: if error.is_temporary() {
-                Some(Duration::from_secs(30))
-            } else {
-                Some(Duration::from_secs(300))
-            },
+    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> Action {
+        if error.is_temporary() {
+            Action::requeue(Duration::from_secs(30))
+        } else {
+            Action::requeue(Duration::from_secs(300))
         }
     }
 
@@ -727,7 +722,7 @@ impl ResourceControllerImpl {
             // Watch destinations objects, to track destination drift. Note, this only works realiably if
             // the `app.kubernetes.io/managed-by` label and the `sync.rustrial.org/source-object` annotation
             // are still set properly. If those are changed, drift will be removed in an eventual
-            // consistent approach by setting `ReconcilerAction::requeue_after`.
+            // consistent approach by setting `Action::requeue_after`.
             .watches_with(
                 dst_api,
                 self.api_resource.clone(),

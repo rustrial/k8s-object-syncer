@@ -13,7 +13,7 @@ use kube::{
     discovery, Api, Client, ResourceExt,
 };
 use kube_runtime::{
-    controller::{Context as Ctx, Controller, ReconcilerAction},
+    controller::{Action, Context as Ctx, Controller},
     reflector::Store,
 };
 use log::{debug, info};
@@ -348,12 +348,9 @@ impl ObjectSyncController {
     }
 
     /// Controller triggers this whenever our main object changed
-    async fn reconcile(
-        object: ObjectSync,
-        ctx: Ctx<Self>,
-    ) -> Result<ReconcilerAction, ControllerError> {
+    async fn reconcile(object: Arc<ObjectSync>, ctx: Ctx<Self>) -> Result<Action, ControllerError> {
         let me = ctx.get_ref();
-        let mut event = ObjectSyncModifications::new(object);
+        let mut event = ObjectSyncModifications::new(object.as_ref().clone());
         let namespace = event.namespace().unwrap_or_else(|| "".to_string());
         if me
             .configuration
@@ -394,19 +391,15 @@ impl ObjectSyncController {
             );
         }
 
-        Ok(ReconcilerAction {
-            requeue_after: Some(Duration::from_secs(3600)),
-        })
+        Ok(Action::requeue(Duration::from_secs(3600)))
     }
 
     /// The controller triggers this on reconcile errors
-    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> ReconcilerAction {
-        ReconcilerAction {
-            requeue_after: if error.is_temporary() {
-                Some(Duration::from_secs(30))
-            } else {
-                Some(Duration::from_secs(300))
-            },
+    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> Action {
+        if error.is_temporary() {
+            Action::requeue(Duration::from_secs(30))
+        } else {
+            Action::requeue(Duration::from_secs(300))
         }
     }
 

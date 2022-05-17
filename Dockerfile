@@ -1,4 +1,4 @@
-ARG ALPINE_VERSION=3.14.0
+ARG ALPINE_VERSION=3.15.4
 
 FROM alpine:$ALPINE_VERSION as builder
 
@@ -6,7 +6,7 @@ RUN apk --no-cache add ca-certificates libgcc gcc pkgconfig openssl-dev build-ba
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 
 
-ENV RUST_CHANNEL=1.54.0
+ENV RUST_CHANNEL=stable
 
 ENV PATH=$PATH:/root/.cargo/bin
 
