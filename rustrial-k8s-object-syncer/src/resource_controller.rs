@@ -6,28 +6,25 @@ use crate::{
     utils::{delete_destinations, metric_name},
     Configuration, FINALIZER, MANAGER,
 };
-
 use futures::{
     channel::mpsc::{channel, Receiver, Sender},
     SinkExt, StreamExt,
 };
 use k8s_openapi::{api::core::v1::Namespace, chrono::Utc};
 use kube::{
-    api::{
-        ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams,
-        TypeMeta,
-    },
+    api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams, TypeMeta},
     Api, Client, ResourceExt,
 };
 use kube_runtime::{
-    controller::{Action, Context as Ctx, Controller},
+    controller::{Action, Controller},
     reflector::{ObjectRef, Store},
+    watcher::{self, Config},
 };
 use log::{debug, error, info};
 use opentelemetry::{
     global::{self},
-    metrics::{Counter, Meter, Unit, ValueRecorder},
-    KeyValue,
+    metrics::{Counter, Histogram, Meter, Unit},
+    Context, KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{
     Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, SyncStrategy,
@@ -91,7 +88,7 @@ impl std::fmt::Display for NamespacedName {
 impl From<&DynamicObject> for NamespacedName {
     fn from(o: &DynamicObject) -> Self {
         Self {
-            name: o.name(),
+            name: o.name_any(),
             namespace: o.namespace().unwrap_or_else(|| "".to_string()),
         }
     }
@@ -100,7 +97,7 @@ impl From<&DynamicObject> for NamespacedName {
 impl From<&ObjectSync> for NamespacedName {
     fn from(o: &ObjectSync) -> Self {
         Self {
-            name: o.name(),
+            name: o.name_any(),
             namespace: o.namespace().unwrap_or_else(|| "".to_string()),
         }
     }
@@ -122,7 +119,7 @@ struct ResourceControllerImpl {
     /// src-ref -> ObjectSync-ref
     sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
     resource_reconcile_count: Counter<u64>,
-    resource_reconcile_duration: ValueRecorder<u64>,
+    resource_reconcile_duration: Histogram<u64>,
 }
 
 const RESOURCE_CONTROLLER: &'static str = "resource_controller";
@@ -141,7 +138,7 @@ impl ResourceControllerImpl {
             .with_description("Count of resources specific reconcile invocations for objects managed by at least one ObjectSync instance")
             .init();
         let resource_reconcile_duration = meter
-            .u64_value_recorder(metric_name("resource_reconcile_duration_ms"))
+            .u64_histogram(metric_name("resource_reconcile_duration_ms"))
             .with_description("Resource specific reconciliation duration in milliseconds")
             .with_unit(Unit::new("ns"))
             .init();
@@ -226,13 +223,13 @@ impl ResourceControllerImpl {
                     // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
                     // destination objects will prevent the namespace from being deleted.
                     if ns.metadata.deletion_timestamp.is_none() {
-                        if let Some((ns, name)) = d.applies_to(event, ns.name().as_str()) {
+                        if let Some((ns, name)) = d.applies_to(event, ns.name_any().as_str()) {
                             tmp.push((ns, name, d.strategy));
                         }
                     }
                 }
             } else if let Some((namespace, name)) = d.applies_to(event, d.namespace.as_str()) {
-                if let Some(ns) = cache.iter().find(|ns| ns.name() == d.namespace) {
+                if let Some(ns) = cache.iter().find(|ns| ns.name_any() == d.namespace) {
                     // Make sure we skip deleted namespaces, as otherwise the finalizers on the synced
                     // destination objects will prevent the namespace from being deleted.
                     if ns.metadata.deletion_timestamp.is_none() {
@@ -264,7 +261,7 @@ impl ResourceControllerImpl {
             format!(
                 "{}/{}",
                 source.namespace().as_deref().unwrap_or(""),
-                source.name()
+                source.name_any()
             ),
         );
         let mut changed = false;
@@ -289,7 +286,6 @@ impl ResourceControllerImpl {
             template.metadata.managed_fields = Default::default();
             template.metadata.owner_references = Default::default();
             template.metadata.self_link = Default::default();
-            template.metadata.cluster_name = Default::default();
             template.metadata.creation_timestamp = Default::default();
             template.metadata.finalizers = Some(vec![FINALIZER.to_string()]);
             let api = self.namespaced_api(d.namespace.as_str());
@@ -535,10 +531,10 @@ impl ResourceControllerImpl {
     /// Controller triggers this whenever our main object or our children changed
     async fn reconcile(
         source: Arc<DynamicObject>,
-        ctx: Ctx<Self>,
+        ctx: Arc<Self>,
     ) -> Result<Action, ControllerError> {
         let start = Instant::now();
-        let me = ctx.get_ref();
+        let me = ctx.as_ref();
         let namespaced_name = NamespacedName::from(source.as_ref());
 
         let source_id = format!(
@@ -573,7 +569,7 @@ impl ResourceControllerImpl {
                 KeyValue::new("group", me.gvk.group.clone()),
                 KeyValue::new("version", me.gvk.version.clone()),
                 KeyValue::new("kind", me.gvk.kind.clone()),
-                KeyValue::new("object_name", source.name()),
+                KeyValue::new("object_name", source.name_any()),
                 KeyValue::new("object_namespace", namespaced_name.namespace.clone()),
             ];
             if source.metadata.deletion_timestamp.is_some() {
@@ -623,9 +619,10 @@ impl ResourceControllerImpl {
             }
             // Only update metrics
             let duration = Instant::now() - start;
-            me.resource_reconcile_count.add(1, labels);
+            let context = Context::current();
+            me.resource_reconcile_count.add(&context, 1, labels);
             me.resource_reconcile_duration
-                .record(duration.as_millis() as u64, labels);
+                .record(&&context, duration.as_millis() as u64, labels);
             // Requeue objects tracked by ObjectSync configuration to make sure any
             // downstream destination drift is elminitated in an eventual consistent manner.
             Ok(Action::requeue(Duration::from_secs(300)))
@@ -640,7 +637,11 @@ impl ResourceControllerImpl {
     }
 
     /// The controller triggers this on reconcile errors
-    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> Action {
+    fn error_policy(
+        _object: Arc<DynamicObject>,
+        error: &ControllerError,
+        _ctx: Arc<Self>,
+    ) -> Action {
         if error.is_temporary() {
             Action::requeue(Duration::from_secs(30))
         } else {
@@ -670,11 +671,11 @@ impl ResourceControllerImpl {
         let api_resource3 = self.api_resource.clone();
         let src_api = self.api(&self.configuration.source_namespaces);
         let dst_api = self.api(&self.configuration.target_namespaces);
-        let list_params = ListParams::default();
-        let controller = Controller::new_with(src_api, list_params, self.api_resource.clone());
+        let config = Config::default();
+        let controller = Controller::new_with(src_api, config, self.api_resource.clone());
         let sources = self.sources.clone();
         let sources2 = sources.clone();
-        let mut lp_dst = ListParams::default();
+        let mut lp_dst = watcher::Config::default();
         lp_dst.label_selector = Some(format!("app.kubernetes.io/managed-by={}", MANAGER));
         let source_object_annotation_key = format!("{}/source-object", API_GROUP);
         let controller = controller
@@ -682,11 +683,11 @@ impl ResourceControllerImpl {
             // Watch namespaces to track newly created namespaces.
             .watches(
                 Api::<Namespace>::all(self.client()),
-                ListParams::default(),
+                watcher::Config::default(),
                 move |namespace| {
                     let is_target_namespace = target_namespaces2
                         .as_ref()
-                        .map_or(true, |v| v.contains(namespace.name().as_str()));
+                        .map_or(true, |v| v.contains(namespace.name_any().as_str()));
                     if let Some(ct) = &namespace.metadata.creation_timestamp {
                         let age = Utc::now() - ct.0;
                         if is_target_namespace && age.num_seconds() < 300 {
@@ -706,7 +707,7 @@ impl ResourceControllerImpl {
             // Watch ObjectSync objects, to track destination changes.
             .watches(
                 self.configuration.resource_sync.clone(),
-                ListParams::default(),
+                watcher::Config::default(),
                 move |rs| {
                     let namespaced_name = NamespacedName::from(&rs);
                     let guard = futures::executor::block_on(sources2.read());
@@ -748,7 +749,7 @@ impl ResourceControllerImpl {
                     }
                 },
             )
-            .run(Self::reconcile, Self::error_policy, Ctx::new(self))
+            .run(Self::reconcile, Self::error_policy, Arc::new(self))
             .for_each(|res| async move {
                 match res {
                     Ok(_o) => {}
@@ -763,7 +764,7 @@ impl ResourceControllerImpl {
                         match e {
                             a @ kube_runtime::controller::Error::QueueError { .. } => {
                                 debug!("reconcile failed: {:?}", a);
-                                reconcile_kind_errors.add(1, &[]);
+                                reconcile_kind_errors.add(&Context::current(), 1, &[]);
                                 // Slow down on errors caused by missing CRDs or permissions.
                                 sleep(Duration::from_secs(30)).await;
                             }
@@ -772,7 +773,7 @@ impl ResourceControllerImpl {
                             }
                             e => {
                                 warn!("reconcile failed: {:?}", e);
-                                reconcile_kind_errors.add(1, &[]);
+                                reconcile_kind_errors.add(&Context::current(), 1, &[]);
                             }
                         };
                     }

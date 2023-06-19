@@ -9,18 +9,19 @@ use crate::{
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
-    api::{ApiResource, DynamicObject, GroupVersionKind, ListParams, TypeMeta},
+    api::{ApiResource, DynamicObject, GroupVersionKind, TypeMeta},
     discovery, Api, Client, ResourceExt,
 };
 use kube_runtime::{
-    controller::{Action, Context as Ctx, Controller},
+    controller::{Action, Controller},
     reflector::Store,
+    watcher::Config,
 };
 use log::{debug, info};
 use opentelemetry::{
     global,
-    metrics::{Counter, Meter, Unit, ValueRecorder},
-    KeyValue,
+    metrics::{Counter, Histogram, Meter, Unit},
+    Context, KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{Condition, ObjectSync, SourceObject};
 use std::{
@@ -73,7 +74,7 @@ pub(crate) struct ObjectSyncController {
     instances: Arc<RwLock<HashMap<String, ObjectSyncInstance>>>,
 
     reconcile_object_sync_count: Counter<u64>,
-    reconcile_object_sync_duration: ValueRecorder<u64>,
+    reconcile_object_sync_duration: Histogram<u64>,
 }
 
 impl ObjectSyncController {
@@ -84,7 +85,7 @@ impl ObjectSyncController {
             .with_description("Count of ObjectSync reconcile invocations")
             .init();
         let reconcile_object_sync_duration = meter
-            .u64_value_recorder(metric_name("reconcile_duration_ms"))
+            .u64_histogram(metric_name("reconcile_duration_ms"))
             .with_description("Reconcile duration of ObjectSync objects in milliseconds")
             .with_unit(Unit::new("ns"))
             .init();
@@ -348,8 +349,8 @@ impl ObjectSyncController {
     }
 
     /// Controller triggers this whenever our main object changed
-    async fn reconcile(object: Arc<ObjectSync>, ctx: Ctx<Self>) -> Result<Action, ControllerError> {
-        let me = ctx.get_ref();
+    async fn reconcile(object: Arc<ObjectSync>, ctx: Arc<Self>) -> Result<Action, ControllerError> {
+        let me = ctx.as_ref();
         let mut event = ObjectSyncModifications::new(object.as_ref().clone());
         let namespace = event.namespace().unwrap_or_else(|| "".to_string());
         if me
@@ -362,28 +363,29 @@ impl ObjectSyncController {
         {
             let start = Instant::now();
             if event.is_deleted() {
-                ctx.get_ref().delete(&mut event).await?;
+                ctx.as_ref().delete(&mut event).await?;
             } else {
-                if let Err(e) = ctx.get_ref().check(&mut event).await {
+                if let Err(e) = ctx.as_ref().check(&mut event).await {
                     event.update_condition(Condition::new(
                         READY,
                         Some(false),
                         FAILURE,
                         format!("{}", e),
                     ));
-                    event.replace_status(ctx.get_ref().client()).await?;
+                    event.replace_status(ctx.as_ref().client()).await?;
                     Err(e)?
                 }
             };
             let duration = Instant::now() - start;
 
             let labels = &[
-                KeyValue::new("object_name", event.name()),
+                KeyValue::new("object_name", event.name_any()),
                 KeyValue::new("object_namespace", namespace),
             ];
-            me.reconcile_object_sync_count.add(1, labels);
+            let context = Context::current();
+            me.reconcile_object_sync_count.add(&context, 1, labels);
             me.reconcile_object_sync_duration
-                .record(duration.as_millis() as u64, labels);
+                .record(&context, duration.as_millis() as u64, labels);
         } else {
             debug!(
                 "Ignore {} as its namespace is not in the set of namespaces to watch for ObjectSync objects",
@@ -395,7 +397,9 @@ impl ObjectSyncController {
     }
 
     /// The controller triggers this on reconcile errors
-    fn error_policy(error: &ControllerError, _ctx: Ctx<Self>) -> Action {
+    ///
+    /// Arc<K>, &ReconcilerFut::Error, Arc<Ctx>
+    fn error_policy(_object: Arc<ObjectSync>, error: &ControllerError, _ctx: Arc<Self>) -> Action {
         if error.is_temporary() {
             Action::requeue(Duration::from_secs(30))
         } else {
@@ -404,12 +408,10 @@ impl ObjectSyncController {
     }
 
     pub fn start(self) -> impl Future<Output = ()> {
-        let controller = Controller::new(
-            self.configuration.resource_sync.clone(),
-            ListParams::default(),
-        );
+        let controller =
+            Controller::new(self.configuration.resource_sync.clone(), Config::default());
         let controller = controller
-            .run(Self::reconcile, Self::error_policy, Ctx::new(self))
+            .run(Self::reconcile, Self::error_policy, Arc::new(self))
             .for_each(|res| async move {
                 match res {
                     Ok(o) => {
@@ -428,7 +430,7 @@ impl ObjectSyncController {
                         match e {
                             a @ kube_runtime::controller::Error::QueueError { .. } => {
                                 debug!("reconcile failed: {:?}", a);
-                                reconcile_object_sync_errors.add(1, labels);
+                                reconcile_object_sync_errors.add(&Context::current(), 1, labels);
                                 // Slow down on errors caused by missing CRDs or permissions.
                                 sleep(Duration::from_secs(30)).await;
                             }
@@ -437,7 +439,7 @@ impl ObjectSyncController {
                             }
                             e => {
                                 warn!("reconcile failed: {:?}", e);
-                                reconcile_object_sync_errors.add(1, labels);
+                                reconcile_object_sync_errors.add(&Context::current(), 1, labels);
                             }
                         };
                     }
