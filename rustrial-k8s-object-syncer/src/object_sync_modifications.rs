@@ -1,5 +1,4 @@
-use std::ops::DerefMut;
-
+use crate::{errors::ControllerError, MANAGER};
 use json_patch::diff;
 use kube::api::PostParams;
 use kube::ResourceExt;
@@ -8,8 +7,7 @@ use kube::{
     Api, Client,
 };
 use rustrial_k8s_object_syncer_apis::ObjectSync;
-
-use crate::{errors::ControllerError, MANAGER};
+use std::ops::DerefMut;
 
 /// Helper construct to simplify updating and patching [`ObjectSync`] objects.
 pub(crate) struct ObjectSyncModifications {
@@ -51,7 +49,7 @@ impl ObjectSyncModifications {
 
     async fn latest(&mut self, client: &Client) -> kube::Result<ObjectSync, ControllerError> {
         let api = self.api(client.clone());
-        let name = self.modified.name();
+        let name = self.modified.name_any();
         Ok(api.get_status(name.as_str()).await?)
     }
 
@@ -65,7 +63,7 @@ impl ObjectSyncModifications {
 
     async fn _replace_spec(&mut self, client: Client, latest: &ObjectSync) -> kube::Result<()> {
         let api = self.api(client);
-        let name = self.modified.name();
+        let name = self.modified.name_any();
         self.modified.metadata.resource_version = latest.metadata.resource_version.clone();
         let mut pp = PostParams::default();
         pp.field_manager = Some(MANAGER.to_string());
@@ -85,7 +83,7 @@ impl ObjectSyncModifications {
 
     async fn _replace_status(&mut self, client: Client, latest: &ObjectSync) -> kube::Result<()> {
         let api = self.api(client);
-        let name = self.modified.name();
+        let name = self.modified.name_any();
         self.modified.metadata.resource_version = latest.metadata.resource_version.clone();
         let mut pp = PostParams::default();
         pp.field_manager = Some(MANAGER.to_string());
@@ -155,7 +153,7 @@ impl ObjectSyncModifications {
     }
 
     async fn _patch_spec(&mut self, client: Client) -> Result<(), ControllerError> {
-        let name = self.modified.name();
+        let name = self.modified.name_any();
         let namespace = self.original.namespace().unwrap_or("".to_string());
         let api = self.api(client);
         let latest = api.get(name.as_str()).await?;
@@ -164,11 +162,12 @@ impl ObjectSyncModifications {
             let patch_txt = serde_json::to_string(&patch).unwrap();
             let response = api
                 .patch(
-                    self.original.name().as_str(),
+                    self.original.name_any().as_str(),
                     &PatchParams {
                         field_manager: Some(MANAGER.to_string()),
                         dry_run: false,
                         force: false,
+                        field_validation: None,
                     },
                     &Patch::<json_patch::Patch>::Json(patch),
                 )
@@ -176,7 +175,7 @@ impl ObjectSyncModifications {
             debug!(
                 "Patch object {}/{} ({:?}) with {} -> {:?}",
                 namespace,
-                self.original.name(),
+                self.original.name_any(),
                 self.original.resource_version(),
                 patch_txt,
                 response
@@ -193,7 +192,7 @@ impl ObjectSyncModifications {
     }
 
     async fn _patch_status(&mut self, client: Client) -> Result<(), ControllerError> {
-        let name = self.modified.name();
+        let name = self.modified.name_any();
         let namespace = self.original.namespace().unwrap_or("".to_string());
         let api = self.api(client);
         let latest = api.get(name.as_str()).await?;
@@ -202,11 +201,12 @@ impl ObjectSyncModifications {
             let patch_txt = serde_json::to_string(&patch).unwrap();
             let response = api
                 .patch_status(
-                    self.original.name().as_str(),
+                    self.original.name_any().as_str(),
                     &PatchParams {
                         field_manager: Some(MANAGER.to_string()),
                         dry_run: false,
                         force: false,
+                        field_validation: None,
                     },
                     &Patch::<json_patch::Patch>::Json(patch),
                 )
@@ -214,7 +214,7 @@ impl ObjectSyncModifications {
             debug!(
                 "Patch object status {}/{} ({:?}) with {} -> {:?}",
                 namespace,
-                self.original.name(),
+                self.original.name_any(),
                 self.original.resource_version(),
                 patch_txt,
                 response

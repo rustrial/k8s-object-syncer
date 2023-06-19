@@ -1,17 +1,17 @@
+use crate::{
+    errors::{ControllerError, ExtKubeApiError},
+    FINALIZER, MANAGER,
+};
 use json_patch::diff;
 use kube::{
     api::{
         ApiResource, DeleteParams, DynamicObject, GroupVersionKind, Patch, PatchParams, TypeMeta,
+        ValidationDirective,
     },
     Api, Client, Resource, ResourceExt,
 };
 use rustrial_k8s_object_syncer_apis::DestinationStatus;
 use serde::{de::DeserializeOwned, Serialize};
-
-use crate::{
-    errors::{ControllerError, ExtKubeApiError},
-    FINALIZER, MANAGER,
-};
 
 pub(crate) async fn add_finalizer_if_missing<T>(
     api: Api<T>,
@@ -30,11 +30,12 @@ where
     {
         finalizers.push(finalizer.to_string());
         api.patch(
-            source.name().as_str(),
+            source.name_any().as_str(),
             &PatchParams {
                 field_manager: Some(MANAGER.to_string()),
                 dry_run: false,
                 force: true,
+                field_validation: Some(ValidationDirective::Ignore),
             },
             &Patch::Apply(source),
         )
@@ -68,11 +69,12 @@ where
         );
         match api
             .patch(
-                source.name().as_str(),
+                source.name_any().as_str(),
                 &PatchParams {
                     field_manager: Some(MANAGER.to_string()),
                     dry_run: false,
                     force: false,
+                    field_validation: None,
                 },
                 &Patch::<T>::Json(patch),
             )
@@ -117,7 +119,7 @@ pub(crate) async fn delete_destinations(
                         "error while removing finalizer from destination object {} {}/{}:{}",
                         gvk.kind,
                         source.namespace().as_deref().unwrap_or(""),
-                        source.name(),
+                        source.name_any(),
                         e
                     );
                 }
