@@ -24,7 +24,7 @@ use log::{debug, error, info};
 use opentelemetry::{
     global::{self},
     metrics::{Counter, Histogram, Meter, Unit},
-    Context, KeyValue,
+    KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{
     Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, SyncStrategy,
@@ -619,10 +619,9 @@ impl ResourceControllerImpl {
             }
             // Only update metrics
             let duration = Instant::now() - start;
-            let context = Context::current();
-            me.resource_reconcile_count.add(&context, 1, labels);
+            me.resource_reconcile_count.add(1, labels);
             me.resource_reconcile_duration
-                .record(&&context, duration.as_millis() as u64, labels);
+                .record(duration.as_millis() as u64, labels);
             // Requeue objects tracked by ObjectSync configuration to make sure any
             // downstream destination drift is elminitated in an eventual consistent manner.
             Ok(Action::requeue(Duration::from_secs(300)))
@@ -764,7 +763,7 @@ impl ResourceControllerImpl {
                         match e {
                             a @ kube_runtime::controller::Error::QueueError { .. } => {
                                 debug!("reconcile failed: {:?}", a);
-                                reconcile_kind_errors.add(&Context::current(), 1, &[]);
+                                reconcile_kind_errors.add(1, &[]);
                                 // Slow down on errors caused by missing CRDs or permissions.
                                 sleep(Duration::from_secs(30)).await;
                             }
@@ -773,7 +772,7 @@ impl ResourceControllerImpl {
                             }
                             e => {
                                 warn!("reconcile failed: {:?}", e);
-                                reconcile_kind_errors.add(&Context::current(), 1, &[]);
+                                reconcile_kind_errors.add(1, &[]);
                             }
                         };
                     }

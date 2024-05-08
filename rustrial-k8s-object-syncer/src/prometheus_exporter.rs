@@ -1,47 +1,54 @@
-use std::{net::SocketAddr, sync::Arc};
-
+use http_body_util::Full;
 use hyper::{
+    body::{Bytes, Incoming},
     header::CONTENT_TYPE,
-    service::{make_service_fn, service_fn},
-    Body, Request, Response, Server,
+    server::conn::http1,
+    service::service_fn,
+    Request, Response,
 };
-use opentelemetry_prometheus::PrometheusExporter;
-use prometheus::{Encoder, TextEncoder};
+use hyper_util::rt::TokioIo;
+use prometheus::{Encoder, Registry, TextEncoder};
+use std::sync::Arc;
+use tokio::net::TcpListener;
 
 async fn serve_req(
-    _req: Request<Body>,
-    prometheus_metrics_exporter: Arc<PrometheusExporter>,
-) -> Result<Response<Body>, hyper::http::Error> {
+    _req: Request<Incoming>,
+    prometheus_metrics_exporter: Arc<Registry>,
+) -> Result<Response<Full<Bytes>>, hyper::http::Error> {
     let encoder = TextEncoder::new();
-    let metric_families = prometheus_metrics_exporter.registry().gather();
+    let metric_families = prometheus_metrics_exporter.gather();
     let mut result = Vec::new();
     let x = match encoder.encode(&metric_families, &mut result) {
         Ok(_) => Response::builder()
             .status(200)
             .header(CONTENT_TYPE, encoder.format_type())
-            .body(Body::from(result)),
+            .body(Full::new(Bytes::from(result))),
         Err(e) => {
             error!("{}", e);
-            Response::builder().status(500).body(Body::empty())
+            Response::builder()
+                .status(500)
+                .body(Full::new(Bytes::new()))
         }
     };
     x
 }
 
 pub(crate) async fn start_prometheus_metrics_server(
-    addr: SocketAddr,
-    prometheus_metrics_exporter: PrometheusExporter,
-) {
-    debug!("Listening on http://{}", addr);
+    listener: TcpListener,
+    prometheus_metrics_exporter: Registry,
+) -> anyhow::Result<()> {
     let exporter = Arc::new(prometheus_metrics_exporter);
-    let handler = make_service_fn(move |_| {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
         let exporter = exporter.clone();
-        async move {
-            Ok::<_, hyper::http::Error>(service_fn(move |req| serve_req(req, exporter.clone())))
-        }
-    });
-    let serve_future = Server::bind(&addr).serve(handler);
-    if let Err(err) = serve_future.await {
-        panic!("metrics server error: {}", err);
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(io, service_fn(|req| serve_req(req, exporter.clone())))
+                .await
+            {
+                eprintln!("Error serving connection: {:?}", err);
+            }
+        });
     }
 }

@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use anyhow::Context;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
@@ -9,13 +10,12 @@ use kube_runtime::{
     watcher::{self},
     WatchStreamExt,
 };
-use opentelemetry::sdk::{
-    export::metrics::aggregation,
-    metrics::{controllers, processors, selectors},
-};
+use opentelemetry::global;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use prometheus_exporter::start_prometheus_metrics_server;
 use rustrial_k8s_object_syncer_apis::ObjectSync;
-use std::collections::HashSet;
+use std::{collections::HashSet, net::SocketAddr};
+use tokio::net::TcpListener;
 
 mod object_sync_controller;
 use object_sync_controller::*;
@@ -107,18 +107,25 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let metrics_addr = env_var("METRICS_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0".to_string());
     let metrics_port = env_var("METRICS_LISTEN_PORT").unwrap_or_else(|| "9000".to_string());
-    let metrics_addr = format!("{}:{}", metrics_addr, metrics_port).parse()?;
-    let controller = controllers::basic(processors::factory(
-        selectors::simple::histogram([
-            200.0, 400.0, 800.0, 1600.0, 3200.0, 6400.0, 12800.0, 25600.0, 51200.0,
-        ]),
-        aggregation::cumulative_temporality_selector(),
-    ))
-    .build();
+    let metrics_addr: SocketAddr = format!("{}:{}", metrics_addr, metrics_port).parse()?;
+    let registry = prometheus::Registry::new();
+    let prometheus_metrics_exporter = opentelemetry_prometheus::exporter()
+        .with_registry(registry.clone())
+        .build()?;
 
-    let prometheus_metrics_exporter = opentelemetry_prometheus::exporter(controller).init();
-    let prometheus_metrics_exporter =
-        start_prometheus_metrics_server(metrics_addr, prometheus_metrics_exporter);
+    let provider = SdkMeterProvider::builder()
+        .with_reader(prometheus_metrics_exporter)
+        .build();
+    global::set_meter_provider(provider);
+
+    let listener = TcpListener::bind(metrics_addr.clone())
+        .await
+        .context(format!(
+            "Failed to bind metrics endpoint to http://{}",
+            metrics_addr
+        ))?;
+    debug!("Listening on http://{}", metrics_addr);
+    let prometheus_metrics_exporter = start_prometheus_metrics_server(listener, registry);
     let client = Client::try_default().await?;
     let namespace_watcher = watcher::watcher(
         Api::<Namespace>::all(client.clone()),
