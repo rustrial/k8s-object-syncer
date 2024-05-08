@@ -21,7 +21,7 @@ use log::{debug, info};
 use opentelemetry::{
     global,
     metrics::{Counter, Histogram, Meter, Unit},
-    Context, KeyValue,
+    KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{Condition, ObjectSync, SourceObject};
 use std::{
@@ -382,10 +382,9 @@ impl ObjectSyncController {
                 KeyValue::new("object_name", event.name_any()),
                 KeyValue::new("object_namespace", namespace),
             ];
-            let context = Context::current();
-            me.reconcile_object_sync_count.add(&context, 1, labels);
+            me.reconcile_object_sync_count.add(1, labels);
             me.reconcile_object_sync_duration
-                .record(&context, duration.as_millis() as u64, labels);
+                .record(duration.as_millis() as u64, labels);
         } else {
             debug!(
                 "Ignore {} as its namespace is not in the set of namespaces to watch for ObjectSync objects",
@@ -430,7 +429,7 @@ impl ObjectSyncController {
                         match e {
                             a @ kube_runtime::controller::Error::QueueError { .. } => {
                                 debug!("reconcile failed: {:?}", a);
-                                reconcile_object_sync_errors.add(&Context::current(), 1, labels);
+                                reconcile_object_sync_errors.add(1, labels);
                                 // Slow down on errors caused by missing CRDs or permissions.
                                 sleep(Duration::from_secs(30)).await;
                             }
@@ -439,7 +438,7 @@ impl ObjectSyncController {
                             }
                             e => {
                                 warn!("reconcile failed: {:?}", e);
-                                reconcile_object_sync_errors.add(&Context::current(), 1, labels);
+                                reconcile_object_sync_errors.add(1, labels);
                             }
                         };
                     }
