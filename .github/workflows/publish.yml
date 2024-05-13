@@ -18,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Extract VERSION from GITHUB_REF
-        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]' >> $GITHUB_ENV
+        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=$(echo "${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set up QEMU
         id: qemu
         uses: docker/setup-qemu-action@v3
@@ -67,7 +67,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Extract VERSION from GITHUB_REF
-        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]' >> $GITHUB_ENV
+        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=$(echo "${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set up Helm
         uses: azure/setup-helm@v3.5
         with:
@@ -142,7 +142,7 @@ jobs:
       - name: Install CR
         run: .github/install-cr.sh
       - name: Extract VERSION from GITHUB_REF
-        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]' >> $GITHUB_ENV
+        run: TAG_NAME="${GITHUB_REF#refs/*/}"; echo "VERSION=$(echo "${TAG_NAME#v}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Update Helm Chart versions
         run: |
           sed -i "s/version: 0.0.0/version: ${{env.VERSION}}/" charts/k8s-object-syncer/Chart.yaml;
