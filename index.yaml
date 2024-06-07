@@ -4,6 +4,18 @@ entries:
   - annotations:
       artifacthub.io/license: Unlicense OR MIT OR Apache-2.0
     apiVersion: v2
+    appVersion: 0.1.10-rc1
+    created: "2024-06-07T18:25:50.895743924Z"
+    description: Kubernetes operator synchronizing objects between namespaces.
+    digest: f377fd8c7211a592f13ee1e40fb140b54f7107fffb808d186a1ca1ebf8fe3531
+    name: k8s-object-syncer
+    type: application
+    urls:
+    - https://github.com/rustrial/k8s-object-syncer/releases/download/k8s-object-syncer-0.1.10-rc1/k8s-object-syncer-0.1.10-rc1.tgz
+    version: 0.1.10-rc1
+  - annotations:
+      artifacthub.io/license: Unlicense OR MIT OR Apache-2.0
+    apiVersion: v2
     appVersion: 0.1.9
     created: "2024-05-13T20:25:40.220096193Z"
     description: Kubernetes operator synchronizing objects between namespaces.
@@ -133,4 +145,4 @@ entries:
     urls:
     - https://github.com/rustrial/k8s-object-syncer/releases/download/k8s-object-syncer-0.1.1/k8s-object-syncer-0.1.1.tgz
     version: 0.1.1
-generated: "2024-05-13T20:25:40.22015909Z"
+generated: "2024-06-07T18:25:50.895807552Z"
