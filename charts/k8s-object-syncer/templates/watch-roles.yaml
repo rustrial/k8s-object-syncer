@@ -1,5 +1,13 @@
 {{- if .Values.serviceAccount.create -}}
-{{- range $index, $watchNamespace := .Values.sourceNamespaces }}
+
+{{ $namespaces := (len (.Values.watchNamespaces | default list)) }}
+{{ if and (eq $namespaces 1) (not (has "*" .Values.watchNamespaces)) }} 
+{{ $namespaces = .Values.watchNamespaces }}
+{{else}}
+{{ $namespaces = list "*" }}
+{{end}}
+
+{{- range $index, $watchNamespace := $namespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
