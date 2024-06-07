@@ -10,9 +10,9 @@ license = "Unlicense OR MIT OR Apache-2.0"
 [dependencies]
 log = "0.4.17"
 env_logger = "0.11.3"
-opentelemetry = "0.22.0"
-opentelemetry_sdk = "0.22.1"
-opentelemetry-prometheus = "0.15.0"
+opentelemetry = "0.23.0"
+opentelemetry_sdk = "0.23.0"
+opentelemetry-prometheus = "0.16.0"
 prometheus = "0.13.0"
 anyhow = { version = "1.0.57", features = ["std"] }
 thiserror = "1.0.26"
@@ -27,7 +27,7 @@ kube = { workspace = true, features = [
 json-patch = "^1.4.0"
 kube-runtime = "0.91.0"
 k8s-openapi = { workspace = true, default-features = false, features = [
-    "v1_29",
+    "v1_30",
     "schemars",
 ] }
 serde = { workspace = true, features = ["derive"] }
