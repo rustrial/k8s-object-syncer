@@ -289,8 +289,8 @@ impl ObjectSync {
     pub fn all_destinations(&self) -> Vec<&DestinationStatus> {
         let status: &Option<ObjectSyncStatus> = &self.status;
         let mut all: Vec<&DestinationStatus> = Default::default();
-        for status in status {
-            for destinations in &status.destinations {
+        if let Some(status) = status {
+            while let Some(destinations) = &status.destinations {
                 all.extend(destinations.iter());
             }
         }

@@ -11,11 +11,11 @@ kube = { workspace = true }
 k8s-openapi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = "0.8.8"
-serde_yaml = "0.9.21"
+schemars = "0.8.21"
+serde_yaml = "0.9.34+deprecated"
 
 [dev-dependencies]
 k8s-openapi = { workspace = true, default-features = false, features = [
-    "v1_30",
+    "v1_32",
     "schemars",
 ] }

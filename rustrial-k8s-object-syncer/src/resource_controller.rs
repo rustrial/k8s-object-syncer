@@ -23,7 +23,7 @@ use kube_runtime::{
 use log::{debug, error, info};
 use opentelemetry::{
     global::{self},
-    metrics::{Counter, Histogram, Meter, Unit},
+    metrics::{Counter, Histogram, Meter},
     KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{
@@ -136,12 +136,12 @@ impl ResourceControllerImpl {
         let resource_reconcile_count = meter
             .u64_counter(metric_name("resource_reconcile_count"))
             .with_description("Count of resources specific reconcile invocations for objects managed by at least one ObjectSync instance")
-            .init();
+            .build();
         let resource_reconcile_duration = meter
             .u64_histogram(metric_name("resource_reconcile_duration_ms"))
             .with_description("Resource specific reconciliation duration in milliseconds")
-            .with_unit(Unit::new("ns"))
-            .init();
+            .with_unit("ns")
+            .build();
         Self {
             configuration,
             api_resource,
@@ -759,7 +759,7 @@ impl ResourceControllerImpl {
                             .with_description(
                                 "Count of reconcile invocation errors for generic resources",
                             )
-                            .init();
+                            .build();
                         match e {
                             a @ kube_runtime::controller::Error::QueueError { .. } => {
                                 debug!("reconcile failed: {:?}", a);
