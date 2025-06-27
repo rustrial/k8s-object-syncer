@@ -561,7 +561,7 @@ impl ResourceControllerImpl {
         // Add type information required by server-side apply.
         let mut source = source.as_ref().clone();
         source.types = Some(TypeMeta {
-            api_version: me.gvk.version.clone(),
+            api_version: me.gvk.api_version(),
             kind: me.gvk.kind.clone(),
         });
         if let Some(sync_configurations) = sync_configurations {
