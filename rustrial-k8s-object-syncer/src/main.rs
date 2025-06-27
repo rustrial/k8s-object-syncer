@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
@@ -13,6 +13,7 @@ use kube_runtime::{
 use opentelemetry::global;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use prometheus_exporter::start_prometheus_metrics_server;
+use rustls::crypto::ring::default_provider;
 use rustrial_k8s_object_syncer_apis::ObjectSync;
 use std::{collections::HashSet, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -105,6 +106,8 @@ async fn ok<T, E>(_: T) -> Result<(), E> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    rustls::crypto::CryptoProvider::install_default(default_provider())
+        .map_err(|e| anyhow!("failed to set crypto provider: {:?}", e))?;
     let metrics_addr = env_var("METRICS_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0".to_string());
     let metrics_port = env_var("METRICS_LISTEN_PORT").unwrap_or_else(|| "9000".to_string());
     let metrics_addr: SocketAddr = format!("{}:{}", metrics_addr, metrics_port).parse()?;

@@ -2,3 +2,4 @@
 .kube-config
 .dccache
 target
+.DS_Store

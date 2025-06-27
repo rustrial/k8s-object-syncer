@@ -3,7 +3,8 @@ members = ["rustrial-k8s-object-syncer-apis", "rustrial-k8s-object-syncer"]
 resolver = "2"
 
 [workspace.dependencies]
-kube = { version = "0.98.0",  default-features = false, features = ["derive"] }
-k8s-openapi = { version = "0.24.0", default-features = false }
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.135"
+kube = { version = "^1.1.0", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "0.25.0", default-features = false }
+serde = { version = "^1.0.217", features = ["derive"] }
+# serde_json version must match the one from kube
+serde_json = "1.0.68"
