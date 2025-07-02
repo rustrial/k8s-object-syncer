@@ -60,15 +60,15 @@ impl Condition {
     status = "ObjectSyncStatus",
     namespaced,
     printcolumn = r#"{
-        "name":"Ready", 
-        "type": "string", 
-        "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status", 
+        "name":"Ready",
+        "type": "string",
+        "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
         "description": "Whether ObjectSync is ready or not. It is considered ready if there were no errors while synchronizing the resource."
     }"#,
     printcolumn = r#"{
-        "name":"InSync", 
-        "type": "string", 
-        "jsonPath": ".status.conditions[?(@.type==\"InSync\")].status", 
+        "name":"InSync",
+        "type": "string",
+        "jsonPath": ".status.conditions[?(@.type==\"InSync\")].status",
         "description": "Whether all destination objects are in sync or not."
     }"#
 )]
@@ -158,7 +158,7 @@ impl Destination {
 
     /// Check whether this [`Destination`] applies to given namespace and if so
     /// returns a tuple `(namespace,name)`.
-    pub fn applies_to(&self, obj: &ObjectSync, namespace: &str) -> Option<(String, String)> {
+    pub fn applies_to(&self, obj: &ObjectSync, dst_namespace: &str) -> Option<(String, String)> {
         let spec: &ObjectSyncSpec = &obj.spec;
         let src_name = spec.source.name.as_str();
         let src_namespace = spec
@@ -168,11 +168,6 @@ impl Destination {
             .or(obj.metadata.namespace.as_deref())
             .unwrap_or("");
         let dst_name = self.name.as_deref().unwrap_or(spec.source.name.as_str());
-        let dst_namespace = if self.applies_to_all_namespaces() {
-            namespace
-        } else {
-            self.namespace.as_str()
-        };
         if self.applies_to_namespace(dst_namespace)
             // make sure destination does not point to source
             && (src_name != dst_name || src_namespace != dst_namespace)
@@ -373,5 +368,87 @@ mod tests {
             r#""replace""#,
             serde_json::to_string(&SyncStrategy::Replace).unwrap()
         );
+    }
+
+    #[test]
+    fn destination() {
+        let source_namespace = Destination {
+            name: None,
+            namespace: "source_namespace".to_string(),
+            strategy: None,
+        };
+
+        let source_namespace_other_name = Destination {
+            name: Some("you".to_string()),
+            namespace: "source_namespace".to_string(),
+            strategy: None,
+        };
+
+        let other_namespace = Destination {
+            name: None,
+            namespace: "other_namespace".to_string(),
+            strategy: None,
+        };
+
+        let all_namespaces = Destination {
+            name: None,
+            namespace: "*".to_string(),
+            strategy: None,
+        };
+
+        let all_namespaces_other_name = Destination {
+            name: Some("you".to_string()),
+            namespace: "*".to_string(),
+            strategy: None,
+        };
+
+        let obj = ObjectSync {
+            metadata: ObjectMeta {
+                name: Some("me".to_string()),
+                namespace: Some("source_namespace".to_string()),
+                ..Default::default()
+            },
+            spec: ObjectSyncSpec {
+                source: SourceObject {
+                    group: "".to_string(),
+                    version: None,
+                    kind: "ConfigMap".to_string(),
+                    name: "me".to_string(),
+                    namespace: None,
+                },
+                destinations: Default::default(),
+            },
+            status: None,
+        };
+
+        // Do not overwrite source (same name & namespace)
+        assert!(all_namespaces
+            .applies_to(&obj, "source_namespace")
+            .is_none());
+        assert!(source_namespace
+            .applies_to(&obj, "source_namespace")
+            .is_none());
+        // Apply if not source but same namespace
+        assert!(all_namespaces_other_name
+            .applies_to(&obj, "source_namespace")
+            .is_some());
+        assert!(source_namespace_other_name
+            .applies_to(&obj, "source_namespace")
+            .is_some());
+        // Apply if different namespace
+        assert!(all_namespaces.applies_to(&obj, "other_namespace").is_some());
+        assert!(other_namespace
+            .applies_to(&obj, "other_namespace")
+            .is_some());
+        assert!(all_namespaces_other_name
+            .applies_to(&obj, "other_namespace")
+            .is_some());
+        // Refuse if destination namespace does not match
+        assert!(source_namespace_other_name
+            .applies_to(&obj, "other_namespace")
+            .is_none());
+        assert!(other_namespace
+            .applies_to(&obj, "source_namespace")
+            .is_none());
     }
 }
