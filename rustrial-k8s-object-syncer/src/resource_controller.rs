@@ -28,7 +28,7 @@ use opentelemetry::{
 };
 use rustrial_k8s_object_syncer_apis::{
     Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, SyncStrategy,
-    API_GROUP,
+    SOURCE_OBJECT_ANNOTATION,
 };
 use std::{
     borrow::BorrowMut,
@@ -49,7 +49,7 @@ const IN_SYNC: &'static str = "InSync";
 
 pub struct ObjectSyncHandle {
     sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
-    src: NamespacedName,
+    pub src: NamespacedName,
     crd: NamespacedName,
 }
 
@@ -257,7 +257,7 @@ impl ResourceControllerImpl {
             MANAGER.to_string(),
         );
         template.annotations_mut().insert(
-            format!("{}/source-object", API_GROUP),
+            SOURCE_OBJECT_ANNOTATION.to_string(),
             format!(
                 "{}/{}",
                 source.namespace().as_deref().unwrap_or(""),
@@ -630,6 +630,23 @@ impl ResourceControllerImpl {
                 "ignoring {} as it is not references by any ObjectSync instance",
                 source_id,
             );
+            // Remove finalizer from source objects, but not from target objects (target
+            // objects have the SOURCE_OBJECT_ANNOTATION annotation set).
+            if let None = source.annotations().get(SOURCE_OBJECT_ANNOTATION) {
+                if let Err(e) = remove_finalizer(
+                    me.namespaced_api(namespaced_name.namespace.as_str()),
+                    &mut source,
+                    FINALIZER,
+                )
+                .await
+                {
+                    error!(
+                        "failed to remove finalizer from no longer referenced source {}: {}",
+                        source_id, e
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(5)));
+                }
+            }
             // No need to requeue objects not tracked by any ObjectSync configuration.
             Ok(Action::await_change())
         }
@@ -676,7 +693,6 @@ impl ResourceControllerImpl {
         let sources2 = sources.clone();
         let mut lp_dst = watcher::Config::default();
         lp_dst.label_selector = Some(format!("app.kubernetes.io/managed-by={}", MANAGER));
-        let source_object_annotation_key = format!("{}/source-object", API_GROUP);
         let controller = controller
             .reconcile_all_on(reload)
             // Watch namespaces to track newly created namespaces.
@@ -732,9 +748,7 @@ impl ResourceControllerImpl {
                     let is_target_namespace = target_namespaces
                         .as_ref()
                         .map_or(true, |v| v.contains(namespace.as_str()));
-                    if let Some(annotation) =
-                        rs.annotations().get(source_object_annotation_key.as_str())
-                    {
+                    if let Some(annotation) = rs.annotations().get(SOURCE_OBJECT_ANNOTATION) {
                         let parts: Vec<&str> = annotation.split("/").collect();
                         match parts.as_slice() {
                             [ns, name] if is_target_namespace => Some(

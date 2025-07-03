@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub const API_GROUP: &'static str = "sync.rustrial.org";
 
+pub const SOURCE_OBJECT_ANNOTATION: &'static str = "sync.rustrial.org/source-object";
+
 /// We maintain our own copy of Condition as the one from k8s_openapi does not implement JsonSchema.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct Condition {

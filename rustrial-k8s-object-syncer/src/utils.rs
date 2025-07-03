@@ -5,41 +5,55 @@ use crate::{
 use json_patch::diff;
 use kube::{
     api::{
-        ApiResource, DeleteParams, DynamicObject, GroupVersionKind, Patch, PatchParams, TypeMeta,
-        ValidationDirective,
+        ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ObjectMeta, Patch, PatchParams,
+        TypeMeta, ValidationDirective,
     },
     Api, Client, Resource, ResourceExt,
 };
 use rustrial_k8s_object_syncer_apis::DestinationStatus;
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 
-pub(crate) async fn add_finalizer_if_missing<T>(
-    api: Api<T>,
-    source: &mut T,
+pub(crate) async fn add_finalizer_if_missing(
+    api: Api<DynamicObject>,
+    source: &mut DynamicObject,
     finalizer: &str,
-) -> Result<bool, ControllerError>
-where
-    T: Clone + std::fmt::Debug + Serialize + DeserializeOwned + Resource,
-{
-    source.meta_mut().managed_fields = Default::default();
-    let finalizers = source.finalizers_mut();
-    if finalizers
+) -> Result<bool, ControllerError> {
+    if source
+        .finalizers()
         .iter()
         .find(|f| f.as_str() == finalizer)
         .is_none()
     {
-        finalizers.push(finalizer.to_string());
+        // The object-sync controller does not own the source object, so we use a
+        // minimal patch for server-side apply to only take ownership of our specific
+        // finalizer.
+        let patch = DynamicObject {
+            types: source.types.clone(),
+            metadata: ObjectMeta {
+                name: source.metadata.name.clone(),
+                namespace: source.metadata.namespace.clone(),
+                // Finalizer list is a Set (listType=set) and SSA ownership is tracked per
+                // unique value, thus we can conveniently only care about our value (no
+                // need to set already existing finalizers values as well).
+                finalizers: Some(vec![finalizer.to_string()]),
+                ..Default::default()
+            },
+            data: Value::Null,
+        };
         api.patch(
-            source.name_any().as_str(),
+            patch.name_any().as_str(),
             &PatchParams {
                 field_manager: Some(MANAGER.to_string()),
                 dry_run: false,
                 force: true,
                 field_validation: Some(ValidationDirective::Ignore),
             },
-            &Patch::Apply(source),
+            &Patch::Apply(patch),
         )
         .await?;
+        // Update source in-memory just to reflect the fact that we added the finalizer.
+        source.finalizers_mut().push(finalizer.to_string());
         Ok(true)
     } else {
         Ok(false)
