@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use k8s_openapi::chrono::{SecondsFormat, Utc};
-use kube::{api::ObjectMeta, CustomResource, ResourceExt};
+use kube::{CustomResource, ResourceExt, api::ObjectMeta};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -434,33 +434,49 @@ mod tests {
         };
 
         // Do not overwrite source (same name & namespace)
-        assert!(all_namespaces
-            .applies_to(&obj, "source_namespace")
-            .is_none());
-        assert!(source_namespace
-            .applies_to(&obj, "source_namespace")
-            .is_none());
+        assert!(
+            all_namespaces
+                .applies_to(&obj, "source_namespace")
+                .is_none()
+        );
+        assert!(
+            source_namespace
+                .applies_to(&obj, "source_namespace")
+                .is_none()
+        );
         // Apply if not source but same namespace
-        assert!(all_namespaces_other_name
-            .applies_to(&obj, "source_namespace")
-            .is_some());
-        assert!(source_namespace_other_name
-            .applies_to(&obj, "source_namespace")
-            .is_some());
+        assert!(
+            all_namespaces_other_name
+                .applies_to(&obj, "source_namespace")
+                .is_some()
+        );
+        assert!(
+            source_namespace_other_name
+                .applies_to(&obj, "source_namespace")
+                .is_some()
+        );
         // Apply if different namespace
         assert!(all_namespaces.applies_to(&obj, "other_namespace").is_some());
-        assert!(other_namespace
-            .applies_to(&obj, "other_namespace")
-            .is_some());
-        assert!(all_namespaces_other_name
-            .applies_to(&obj, "other_namespace")
-            .is_some());
+        assert!(
+            other_namespace
+                .applies_to(&obj, "other_namespace")
+                .is_some()
+        );
+        assert!(
+            all_namespaces_other_name
+                .applies_to(&obj, "other_namespace")
+                .is_some()
+        );
         // Refuse if destination namespace does not match
-        assert!(source_namespace_other_name
-            .applies_to(&obj, "other_namespace")
-            .is_none());
-        assert!(other_namespace
-            .applies_to(&obj, "source_namespace")
-            .is_none());
+        assert!(
+            source_namespace_other_name
+                .applies_to(&obj, "other_namespace")
+                .is_none()
+        );
+        assert!(
+            other_namespace
+                .applies_to(&obj, "source_namespace")
+                .is_none()
+        );
     }
 }

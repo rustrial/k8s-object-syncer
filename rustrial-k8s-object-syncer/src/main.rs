@@ -1,14 +1,14 @@
 #[macro_use]
 extern crate log;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
 use kube_runtime::{
+    WatchStreamExt,
     reflector::{reflector, store::Writer},
     watcher::{self},
-    WatchStreamExt,
 };
 use opentelemetry::global;
 use opentelemetry_sdk::metrics::SdkMeterProvider;

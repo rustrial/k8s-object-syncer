@@ -1,10 +1,10 @@
 use http_body_util::Full;
 use hyper::{
+    Request, Response,
     body::{Bytes, Incoming},
     header::CONTENT_TYPE,
     server::conn::http1,
     service::service_fn,
-    Request, Response,
 };
 use hyper_util::rt::TokioIo;
 use prometheus::{Encoder, Registry, TextEncoder};
