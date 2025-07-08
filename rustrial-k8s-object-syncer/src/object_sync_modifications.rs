@@ -1,10 +1,11 @@
-use crate::{errors::ControllerError, MANAGER};
+use crate::utils::ObjectSyncRef;
+use crate::{MANAGER, errors::ControllerError};
 use json_patch::diff;
-use kube::api::PostParams;
 use kube::ResourceExt;
+use kube::api::PostParams;
 use kube::{
-    api::{Patch, PatchParams},
     Api, Client,
+    api::{Patch, PatchParams},
 };
 use rustrial_k8s_object_syncer_apis::ObjectSync;
 use std::ops::DerefMut;
@@ -30,6 +31,10 @@ impl DerefMut for ObjectSyncModifications {
 }
 
 impl ObjectSyncModifications {
+    pub fn id(&self) -> ObjectSyncRef {
+        ObjectSyncRef::from(self)
+    }
+
     pub(crate) fn new(original: ObjectSync) -> Self {
         let modified = original.clone();
         Self { original, modified }
@@ -132,23 +137,14 @@ impl ObjectSyncModifications {
         &self,
         latest: &ObjectSync,
     ) -> Result<Option<json_patch::Patch>, ControllerError> {
-        let status_patch = {
-            let patch = diff(
-                &serde_json::to_value(&latest.status)?,
-                &serde_json::to_value(&self.modified.status)?,
-            );
-            if patch.0.is_empty() {
-                None
-            } else {
-                Some(patch)
-            }
-        };
-        match status_patch {
-            Some(_) => Ok(Some(diff(
-                &serde_json::to_value(&latest)?,
-                &serde_json::to_value(&self.modified)?,
-            ))),
-            None => Ok(None),
+        let patch = diff(
+            &serde_json::to_value(&latest.status)?,
+            &serde_json::to_value(&self.modified.status)?,
+        );
+        if patch.0.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(patch))
         }
     }
 
@@ -174,45 +170,6 @@ impl ObjectSyncModifications {
                 .await;
             debug!(
                 "Patch object {}/{} ({:?}) with {} -> {:?}",
-                namespace,
-                self.original.name_any(),
-                self.original.resource_version(),
-                patch_txt,
-                response
-            );
-            match response {
-                Ok(new) => {
-                    self.original = new.clone();
-                    self.modified = new;
-                }
-                Err(e) => Err(e)?,
-            }
-        }
-        Ok(())
-    }
-
-    async fn _patch_status(&mut self, client: Client) -> Result<(), ControllerError> {
-        let name = self.modified.name_any();
-        let namespace = self.original.namespace().unwrap_or("".to_string());
-        let api = self.api(client);
-        let latest = api.get(name.as_str()).await?;
-        let spec_patch = self.get_status_patch(&latest)?;
-        if let Some(patch) = spec_patch {
-            let patch_txt = serde_json::to_string(&patch).unwrap();
-            let response = api
-                .patch_status(
-                    self.original.name_any().as_str(),
-                    &PatchParams {
-                        field_manager: Some(MANAGER.to_string()),
-                        dry_run: false,
-                        force: false,
-                        field_validation: None,
-                    },
-                    &Patch::<json_patch::Patch>::Json(patch),
-                )
-                .await;
-            debug!(
-                "Patch object status {}/{} ({:?}) with {} -> {:?}",
                 namespace,
                 self.original.name_any(),
                 self.original.resource_version(),

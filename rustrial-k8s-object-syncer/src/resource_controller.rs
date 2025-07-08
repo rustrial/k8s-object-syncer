@@ -1,19 +1,21 @@
 use crate::{
-    errors::{ControllerError, ExtKubeApiError},
-    object_sync_controller::{FAILURE, SUCCESS},
-    object_sync_modifications::ObjectSyncModifications,
-    utils::{add_finalizer_if_missing, remove_finalizer},
-    utils::{delete_destinations, metric_name},
     Configuration, FINALIZER, MANAGER,
+    errors::{ControllerError, ExtKubeApiError},
+    object_sync_controller::{FAILURE, ObjectSyncController, SUCCESS},
+    object_sync_modifications::ObjectSyncModifications,
+    utils::{
+        NamespacedName, ObjectSyncRef, SourceRef, add_finalizer_if_missing, delete_destinations,
+        ensure_gvk, metric_name, remove_finalizer,
+    },
 };
 use futures::{
-    channel::mpsc::{channel, Receiver, Sender},
     SinkExt, StreamExt,
+    channel::mpsc::{Receiver, Sender, channel},
 };
 use k8s_openapi::{api::core::v1::Namespace, chrono::Utc};
 use kube::{
-    api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams, TypeMeta},
     Api, Client, ResourceExt,
+    api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams},
 };
 use kube_runtime::{
     controller::{Action, Controller},
@@ -22,13 +24,13 @@ use kube_runtime::{
 };
 use log::{debug, error, info};
 use opentelemetry::{
+    KeyValue,
     global::{self},
     metrics::{Counter, Histogram, Meter},
-    KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{
-    Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec, SyncStrategy,
-    SOURCE_OBJECT_ANNOTATION,
+    Condition, DestinationStatus, ObjectRevision, ObjectSync, ObjectSyncSpec,
+    SOURCE_OBJECT_ANNOTATION, SyncStrategy,
 };
 use std::{
     borrow::BorrowMut,
@@ -42,15 +44,15 @@ use tokio::{
     spawn,
     sync::{Mutex, RwLock},
     task::JoinHandle,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 
-const IN_SYNC: &'static str = "InSync";
+pub(crate) const IN_SYNC: &'static str = "InSync";
 
 pub struct ObjectSyncHandle {
-    sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
-    pub src: NamespacedName,
-    crd: NamespacedName,
+    sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
+    pub src: SourceRef,
+    crd: ObjectSyncRef,
 }
 
 impl ObjectSyncHandle {
@@ -73,43 +75,6 @@ impl Drop for ObjectSyncHandle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NamespacedName {
-    pub name: String,
-    pub namespace: String,
-}
-
-impl std::fmt::Display for NamespacedName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.namespace, self.name)
-    }
-}
-
-impl From<&DynamicObject> for NamespacedName {
-    fn from(o: &DynamicObject) -> Self {
-        Self {
-            name: o.name_any(),
-            namespace: o.namespace().unwrap_or_else(|| "".to_string()),
-        }
-    }
-}
-
-impl From<&ObjectSync> for NamespacedName {
-    fn from(o: &ObjectSync) -> Self {
-        Self {
-            name: o.name_any(),
-            namespace: o.namespace().unwrap_or_else(|| "".to_string()),
-        }
-    }
-}
-
-impl NamespacedName {
-    pub fn object_ref(&self, ar: &ApiResource) -> ObjectRef<DynamicObject> {
-        ObjectRef::<DynamicObject>::new_with(self.name.as_str(), ar.clone())
-            .within(self.namespace.as_str())
-    }
-}
-
 /// [`ResourceController`] tracks objects of a specific GVK
 struct ResourceControllerImpl {
     configuration: Configuration,
@@ -117,7 +82,7 @@ struct ResourceControllerImpl {
     gvk: GroupVersionKind,
     namespace_cache: Store<Namespace>,
     /// src-ref -> ObjectSync-ref
-    sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
+    sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
     resource_reconcile_count: Counter<u64>,
     resource_reconcile_duration: Histogram<u64>,
 }
@@ -129,7 +94,7 @@ impl ResourceControllerImpl {
         configuration: Configuration,
         namespace_cache: Store<Namespace>,
         gvk: GroupVersionKind,
-        sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
+        sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
     ) -> Self {
         let api_resource = ApiResource::from_gvk(&gvk);
         let meter: Meter = global::meter(RESOURCE_CONTROLLER);
@@ -164,48 +129,8 @@ impl ResourceControllerImpl {
     async fn source_deleted(
         &self,
         rs: &mut ObjectSyncModifications,
-        _source: &DynamicObject,
-        source_name: &NamespacedName,
     ) -> Result<(), ControllerError> {
-        if let Some(destinations) = rs
-            .status
-            .as_ref()
-            .map(|v| v.destinations.as_ref())
-            .flatten()
-        {
-            let remaining = delete_destinations(self.client(), destinations).await?;
-            let errors = remaining.len();
-            let in_sync_condition = if errors > 0 {
-                error!("failed to remove {} destinations of {}", errors, rs.id());
-                Condition::new(
-                    IN_SYNC,
-                    Some(false),
-                    FAILURE,
-                    format!(
-                        "failed to remove {} out of {} destinations",
-                        errors,
-                        destinations.len()
-                    ),
-                )
-            } else {
-                info!(
-                    "successfully removed all destination objects of {} as the source object {} was deleted",
-                    rs.id(), source_name
-                );
-                Condition::new(
-                    IN_SYNC,
-                    Some(true),
-                    SUCCESS,
-                    format!(
-                        "successfully removed all {} destination objects",
-                        destinations.len()
-                    ),
-                )
-            };
-            rs.update_condition(in_sync_condition);
-            rs.update_destinations(remaining);
-            rs.replace_status(self.client()).await?;
-        }
+        ObjectSyncController::delete_destinations(self.client(), rs).await?;
         Ok(())
     }
 
@@ -528,6 +453,43 @@ impl ResourceControllerImpl {
         }
     }
 
+    async fn lookup_object_syncs_for_source(
+        &self,
+        source_ref: &SourceRef,
+    ) -> Option<Vec<ObjectSyncModifications>> {
+        let is_source_namespace = self
+            .configuration
+            .source_namespaces
+            .as_ref()
+            .map_or(true, |v| {
+                v.is_empty() || v.contains(source_ref.namespace.as_str()) || v.contains("*")
+            });
+        // Get ObjectSync object names that reference this object if
+        // the objct resides in on of the tracked source namespaces.
+        let refs = if is_source_namespace {
+            let guard = self.sources.read().await;
+            guard.get(&source_ref).cloned()
+        } else {
+            None
+        }
+        .filter(|c| !c.is_empty());
+        if let Some(refs) = refs {
+            let mut objs = vec![];
+            for r in &refs {
+                // Load ObjectSync by name
+                if let Some(rs) = self.get_object_sync(&source_ref, &r).await
+                    // but only use it if its source still matches
+                    && SourceRef::from(&rs) == *source_ref
+                {
+                    objs.push(rs);
+                }
+            }
+            Some(objs)
+        } else {
+            None
+        }
+    }
+
     /// Controller triggers this whenever our main object or our children changed
     async fn reconcile(
         source: Arc<DynamicObject>,
@@ -535,58 +497,35 @@ impl ResourceControllerImpl {
     ) -> Result<Action, ControllerError> {
         let start = Instant::now();
         let me = ctx.as_ref();
-        let namespaced_name = NamespacedName::from(source.as_ref());
+        let source_ref = SourceRef::from(source.as_ref());
 
         let source_id = format!(
             "{}/{}/{} {}",
-            me.gvk.group, me.gvk.version, me.gvk.kind, namespaced_name
+            me.gvk.group, me.gvk.version, me.gvk.kind, source_ref
         );
-
-        let is_source_namespace = me
-            .configuration
-            .source_namespaces
-            .as_ref()
-            .map_or(true, |v| {
-                v.is_empty() || v.contains(namespaced_name.namespace.as_str()) || v.contains("*")
-            });
-
-        let sync_configurations = if is_source_namespace {
-            let guard = me.sources.read().await;
-            guard.get(&namespaced_name).cloned()
-        } else {
-            None
-        }
-        .filter(|c| !c.is_empty());
-
+        // Get ObjectSync object names that reference this object if
+        // the objct resides in on of the tracked source namespaces.
+        let sync_configurations = me.lookup_object_syncs_for_source(&source_ref).await;
         // Add type information required by server-side apply.
-        let mut source = source.as_ref().clone();
-        source.types = Some(TypeMeta {
-            api_version: me.gvk.api_version(),
-            kind: me.gvk.kind.clone(),
-        });
+        let mut source = ensure_gvk(source.as_ref().clone(), &me.gvk);
         if let Some(sync_configurations) = sync_configurations {
             let labels = &[
                 KeyValue::new("group", me.gvk.group.clone()),
                 KeyValue::new("version", me.gvk.version.clone()),
                 KeyValue::new("kind", me.gvk.kind.clone()),
                 KeyValue::new("object_name", source.name_any()),
-                KeyValue::new("object_namespace", namespaced_name.namespace.clone()),
+                KeyValue::new("object_namespace", source_ref.namespace.clone()),
             ];
             if source.metadata.deletion_timestamp.is_some() {
-                for sync_configuration in sync_configurations {
+                for mut sync_configuration in sync_configurations {
                     let mut errors = 0;
-                    if let Some(mut rs) = me
-                        .get_object_sync(&namespaced_name, &sync_configuration)
-                        .await
-                    {
-                        if let Err(_) = me.source_deleted(&mut rs, &source, &namespaced_name).await
-                        {
-                            errors += 1;
-                        }
+                    if let Err(_) = me.source_deleted(&mut sync_configuration).await {
+                        errors += 1;
                     }
+
                     if errors == 0 {
                         if let Err(e) = remove_finalizer(
-                            me.namespaced_api(namespaced_name.namespace.as_str()),
+                            me.namespaced_api(source_ref.namespace.as_str()),
                             &mut source,
                             FINALIZER,
                         )
@@ -598,7 +537,7 @@ impl ResourceControllerImpl {
                 }
             } else {
                 if let Err(e) = add_finalizer_if_missing(
-                    me.namespaced_api(namespaced_name.namespace.as_str()),
+                    me.namespaced_api(source_ref.namespace.as_str()),
                     &mut source,
                     FINALIZER,
                 )
@@ -606,14 +545,14 @@ impl ResourceControllerImpl {
                 {
                     error!("failed to add finalizer to {}: {}", source_id, e);
                 }
-                for sync_configuration in sync_configurations {
-                    if let Some(mut rs) = me
-                        .get_object_sync(&namespaced_name, &sync_configuration)
-                        .await
-                    {
-                        if let Err(e) = me.reconcile_source(&mut rs, &source).await {
-                            error!("failed to reconcile {} for {}: {}", source_id, rs.id(), e);
-                        }
+                for mut sync_configuration in sync_configurations {
+                    if let Err(e) = me.reconcile_source(&mut sync_configuration, &source).await {
+                        error!(
+                            "failed to reconcile {} for {}: {}",
+                            source_id,
+                            sync_configuration.id(),
+                            e
+                        );
                     }
                 }
             }
@@ -630,11 +569,13 @@ impl ResourceControllerImpl {
                 "ignoring {} as it is not references by any ObjectSync instance",
                 source_id,
             );
-            // Remove finalizer from source objects, but not from target objects (target
-            // objects have the SOURCE_OBJECT_ANNOTATION annotation set).
-            if let None = source.annotations().get(SOURCE_OBJECT_ANNOTATION) {
+            // Remove finalizer from source objects, but not from target objects unless they are
+            // marked for deletion (target objects have the SOURCE_OBJECT_ANNOTATION annotation set).
+            if source.annotations().get(SOURCE_OBJECT_ANNOTATION).is_none()
+                || source.metadata.deletion_timestamp.is_some()
+            {
                 if let Err(e) = remove_finalizer(
-                    me.namespaced_api(namespaced_name.namespace.as_str()),
+                    me.namespaced_api(source_ref.namespace.as_str()),
                     &mut source,
                     FINALIZER,
                 )
@@ -724,12 +665,12 @@ impl ResourceControllerImpl {
                 self.configuration.resource_sync.clone(),
                 watcher::Config::default(),
                 move |rs| {
-                    let namespaced_name = NamespacedName::from(&rs);
+                    let object_sync_ref = ObjectSyncRef::from(&rs);
                     let guard = futures::executor::block_on(sources2.read());
                     let affected: Vec<ObjectRef<DynamicObject>> = guard
                         .values()
                         .flatten()
-                        .filter(|v| *v == &namespaced_name)
+                        .filter(|v| *v == &object_sync_ref)
                         .map(|v| v.object_ref(&api_resource2))
                         .collect();
                     affected
@@ -801,7 +742,7 @@ pub(crate) struct ResourceController {
     gvk: GroupVersionKind,
     /// Mapping from GVK source object name to names of [`ObjectSync`] objects, which
     /// reference that source object.
-    sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>>,
+    sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
     /// The handle to the effective controller, needed to stop (abort) it.
     join_handle: JoinHandle<()>,
     reload_sender: Mutex<Sender<()>>,
@@ -824,8 +765,7 @@ impl ResourceController {
         gvk: GroupVersionKind,
     ) -> Result<Self, ControllerError> {
         let (reload_sender, reload_receiver) = channel(0);
-        let sources: Arc<RwLock<HashMap<NamespacedName, HashSet<NamespacedName>>>> =
-            Default::default();
+        let sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>> = Default::default();
         let inner =
             ResourceControllerImpl::new(config, namespace_cache, gvk.clone(), sources.clone());
         let join_handle = spawn(inner.start(reload_receiver).await?);
@@ -839,17 +779,8 @@ impl ResourceController {
     }
 
     pub async fn register(&self, event: &ObjectSyncModifications) -> ObjectSyncHandle {
-        let src_name = NamespacedName {
-            name: event.spec.source.name.clone(),
-            namespace: event
-                .spec
-                .source
-                .namespace
-                .clone()
-                .or_else(|| event.namespace())
-                .unwrap_or_else(|| "".to_string()),
-        };
-        let crd_name = NamespacedName::from(event.deref());
+        let src_name = SourceRef::from(event);
+        let crd_name = ObjectSyncRef::from(event.deref());
         {
             let mut guard = self.sources.write().await;
             match guard.get_mut(&src_name) {

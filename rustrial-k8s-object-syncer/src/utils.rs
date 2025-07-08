@@ -1,18 +1,136 @@
+use std::{fmt::Display, ops::Deref};
+
 use crate::{
-    errors::{ControllerError, ExtKubeApiError},
     FINALIZER, MANAGER,
+    errors::{ControllerError, ExtKubeApiError},
+    object_sync_modifications::ObjectSyncModifications,
 };
 use json_patch::diff;
 use kube::{
+    Api, Client, Resource, ResourceExt,
     api::{
         ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ObjectMeta, Patch, PatchParams,
         TypeMeta, ValidationDirective,
     },
-    Api, Client, Resource, ResourceExt,
 };
-use rustrial_k8s_object_syncer_apis::DestinationStatus;
-use serde::{de::DeserializeOwned, Serialize};
+
+use kube_runtime::reflector::ObjectRef;
+use rustrial_k8s_object_syncer_apis::{DestinationStatus, ObjectSync};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NamespacedName {
+    pub name: String,
+    pub namespace: String,
+}
+
+impl std::fmt::Display for NamespacedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.name)
+    }
+}
+
+impl From<&DynamicObject> for NamespacedName {
+    fn from(o: &DynamicObject) -> Self {
+        Self {
+            name: o.name_any(),
+            namespace: o.namespace().unwrap_or_else(|| "".to_string()),
+        }
+    }
+}
+
+impl From<&ObjectSync> for NamespacedName {
+    fn from(o: &ObjectSync) -> Self {
+        Self {
+            name: o.name_any(),
+            namespace: o.namespace().unwrap_or_else(|| "".to_string()),
+        }
+    }
+}
+
+impl NamespacedName {
+    pub fn object_ref(&self, ar: &ApiResource) -> ObjectRef<DynamicObject> {
+        ObjectRef::<DynamicObject>::new_with(self.name.as_str(), ar.clone())
+            .within(self.namespace.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ObjectSyncRef(NamespacedName);
+
+impl Display for ObjectSyncRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for ObjectSyncRef {
+    type Target = NamespacedName;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<&ObjectSync> for ObjectSyncRef {
+    fn from(value: &ObjectSync) -> Self {
+        Self(NamespacedName::from(value))
+    }
+}
+
+impl From<&ObjectSyncModifications> for ObjectSyncRef {
+    fn from(value: &ObjectSyncModifications) -> Self {
+        Self(NamespacedName::from(&value.modified))
+    }
+}
+
+impl From<&mut ObjectSyncModifications> for ObjectSyncRef {
+    fn from(value: &mut ObjectSyncModifications) -> Self {
+        Self(NamespacedName::from(&value.modified))
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct SourceRef(NamespacedName);
+
+impl Display for SourceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for SourceRef {
+    type Target = NamespacedName;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<&DynamicObject> for SourceRef {
+    fn from(value: &DynamicObject) -> Self {
+        Self(NamespacedName::from(value))
+    }
+}
+
+impl From<&ObjectSyncModifications> for SourceRef {
+    fn from(value: &ObjectSyncModifications) -> Self {
+        Self(NamespacedName {
+            name: value.spec.source.name.clone(),
+            namespace: value.source_namespace().unwrap_or_else(|| "".to_string()),
+        })
+    }
+}
+
+/// Ensure kind and api_version are properly set
+pub(crate) fn ensure_gvk(mut source: DynamicObject, gvk: &GroupVersionKind) -> DynamicObject {
+    source.types = source.types.or(Some(TypeMeta {
+        kind: gvk.kind.clone(),
+        api_version: gvk.api_version(),
+    }));
+    source
+}
 
 pub(crate) async fn add_finalizer_if_missing(
     api: Api<DynamicObject>,
@@ -122,18 +240,14 @@ pub(crate) async fn delete_destinations(
             Api::namespaced_with(client.clone(), d.namespace.as_str(), &api_resource);
 
         // Remove finalizer from destination object.
-        match api.get(d.name.as_str()).await {
-            Ok(mut source) => {
-                source.types = source.types.or(Some(TypeMeta {
-                    kind: gvk.kind.clone(),
-                    api_version: gvk.api_version(),
-                }));
-                if let Err(e) = remove_finalizer(api.clone(), &mut source, FINALIZER).await {
+        match api.get(d.name.as_str()).await.map(|v| ensure_gvk(v, &gvk)) {
+            Ok(mut destination) => {
+                if let Err(e) = remove_finalizer(api.clone(), &mut destination, FINALIZER).await {
                     warn!(
                         "error while removing finalizer from destination object {} {}/{}:{}",
                         gvk.kind,
-                        source.namespace().as_deref().unwrap_or(""),
-                        source.name_any(),
+                        destination.namespace().as_deref().unwrap_or(""),
+                        destination.name_any(),
                         e
                     );
                 }

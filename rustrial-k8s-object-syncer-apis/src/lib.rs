@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use k8s_openapi::chrono::{SecondsFormat, Utc};
-use kube::{api::ObjectMeta, CustomResource};
+use kube::{api::ObjectMeta, CustomResource, ResourceExt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -283,15 +283,11 @@ impl ObjectSync {
         )
     }
 
-    pub fn all_destinations(&self) -> Vec<&DestinationStatus> {
-        let status: &Option<ObjectSyncStatus> = &self.status;
-        let mut all: Vec<&DestinationStatus> = Default::default();
-        if let Some(status) = status {
-            while let Some(destinations) = &status.destinations {
-                all.extend(destinations.iter());
-            }
-        }
-        all
+    pub fn status_destinations(&self) -> Option<&Vec<DestinationStatus>> {
+        self.status
+            .as_ref()
+            .map(|v| v.destinations.as_ref())
+            .flatten()
     }
 
     pub fn update_condition(&mut self, c: Condition) {
@@ -310,6 +306,20 @@ impl ObjectSync {
             .unwrap_or_else(|| ObjectSyncStatus::default());
         status.update_destinations(destinations);
         self.status = Some(status);
+    }
+
+    pub fn source_name(&self) -> &str {
+        &self.spec.source.name
+    }
+
+    /// Return the namespace of the source object, which defaults
+    /// to the namespace of the ObjectSync object.
+    pub fn source_namespace(&self) -> Option<String> {
+        self.spec
+            .source
+            .namespace
+            .clone()
+            .or_else(|| self.namespace())
     }
 }
 

@@ -1,16 +1,19 @@
 use crate::{
+    Configuration, FINALIZER,
     errors::{ControllerError, ExtKubeApiError},
     object_sync_modifications::ObjectSyncModifications,
-    resource_controller::{ObjectSyncHandle, ResourceController},
-    utils::{delete_destinations, metric_name, remove_finalizer},
-    Configuration, FINALIZER,
+    resource_controller::{IN_SYNC, ObjectSyncHandle, ResourceController},
+    utils::{
+        ObjectSyncRef, SourceRef, delete_destinations, ensure_gvk, metric_name, remove_finalizer,
+    },
 };
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
-    api::{ApiResource, DynamicObject, GroupVersionKind, TypeMeta},
-    discovery, Api, Client, ResourceExt,
+    Api, Client, ResourceExt,
+    api::{ApiResource, DynamicObject, GroupVersionKind},
+    discovery,
 };
 use kube_runtime::{
     controller::{Action, Controller},
@@ -19,9 +22,8 @@ use kube_runtime::{
 };
 use log::{debug, info};
 use opentelemetry::{
-    global,
+    KeyValue, global,
     metrics::{Counter, Histogram, Meter},
-    KeyValue,
 };
 use rustrial_k8s_object_syncer_apis::{Condition, ObjectSync, SourceObject};
 use std::{
@@ -32,7 +34,7 @@ use std::{
 };
 use tokio::{
     sync::RwLock,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 
 const READY: &'static str = "Ready";
@@ -42,16 +44,32 @@ pub(crate) const FAILURE: &'static str = "Failure";
 const OBJECT_SYNC_CONTROLLER: &'static str = "object_sync_controller";
 
 /// Opaque handle for a [`ObjectSync`] object's registration with a [`ResourceController`].
+/// Basically, this is the registration of one specific source object with the
+/// [`ResourceController`] of its GVK.
 ///
+#[derive(Clone)]
 struct ObjectSyncInstance {
     /// Strong reference to [`ResourceController`] to make sure the corresponding
     /// controller is alive as long as at least one [`ObjectSync`] is registered
     /// with it.
     _resource_controller: Arc<ResourceController>,
     /// If async_dropped will remove the [ObjectSync] from the corresponding [ResourceController].
-    _resource_controller_handle: ObjectSyncHandle,
+    /// Also used to track whether [ObjectSync] spec changed (e.g. whether .spec.source.name or
+    /// .spec.source.namespace changed).
+    resource_controller_handle: Arc<ObjectSyncHandle>,
     /// The GVK of the [ObjectSync] source object, used to track whether [ObjectSync] spec changed.
     gvk: GroupVersionKind,
+}
+
+impl ObjectSyncInstance {
+    /// Check if GVK or name/namespace of source object changed.
+    fn source_changed(&self, new: &ObjectSync, gvk: &GroupVersionKind) -> bool {
+        let old_src = &self.resource_controller_handle.src;
+        let new_source_namespace = new.source_namespace();
+        self.gvk != *gvk
+            || old_src.name != new.spec.source.name
+            || Some(old_src.namespace.as_ref()) != new_source_namespace.as_deref()
+    }
 }
 
 /// The main controller which will spawn one [`ResourceController`] instance per
@@ -63,7 +81,7 @@ pub(crate) struct ObjectSyncController {
     /// Weak reference to [`ResourceController`] instances needed to register [ObjectSyncInstance] instances.
     /// We use weak references to make sure that unused [`ResourceController`] instances are dropped
     /// to make sure there is no unecessary load on the Kubernetes API servers and that there are
-    /// no stale controllers for remove API resoures (e.g. deleted CustomResourceDefinitions).
+    /// no stale controllers for removed API resoures (e.g. deleted CustomResourceDefinitions).
     resource_controllers: Arc<RwLock<HashMap<GroupVersionKind, Weak<ResourceController>>>>,
 
     /// Mapping of [ObjectSync] (namespace/name) to the corresponding [ObjectSyncInstance] object.
@@ -71,7 +89,7 @@ pub(crate) struct ObjectSyncController {
     /// sure the system is eventual consistent in case the controller should ever miss any events
     /// caused by replacement (delete/create) of the underlying object. Practically, it should see all
     /// events, but let's be defensive it can't hurt.
-    instances: Arc<RwLock<HashMap<String, ObjectSyncInstance>>>,
+    instances: Arc<RwLock<HashMap<ObjectSyncRef, ObjectSyncInstance>>>,
 
     reconcile_object_sync_count: Counter<u64>,
     reconcile_object_sync_duration: Histogram<u64>,
@@ -187,7 +205,7 @@ impl ObjectSyncController {
             );
             Some(gvk)
             // The opaque ObjectSyncInstance handle `instance` is dropped here and
-            // its `Drop` implementation will make sure it is deregisterd from its
+            // its `Drop` implementation will make sure it is deregistered from its
             // `ResourceController`.
         } else {
             warn!(
@@ -226,7 +244,7 @@ impl ObjectSyncController {
             event.id(),
             ObjectSyncInstance {
                 _resource_controller: resource_controller,
-                _resource_controller_handle: resource_controller_handle,
+                resource_controller_handle: Arc::new(resource_controller_handle),
                 gvk,
             },
         );
@@ -237,50 +255,74 @@ impl ObjectSyncController {
         self.configuration.client.clone()
     }
 
+    pub async fn delete_destinations(
+        client: Client,
+        event: &mut ObjectSyncModifications,
+    ) -> Result<(), ControllerError> {
+        if let Some(destinations) = event.status_destinations() {
+            let dest_count = destinations.len();
+            let remaining = delete_destinations(client.clone(), destinations).await?;
+            let remaining_count = remaining.len();
+            let in_sync_condition = if remaining_count > 0 {
+                Condition::new(
+                    IN_SYNC,
+                    Some(false),
+                    FAILURE,
+                    format!(
+                        "failed to remove {} out of {} destination objects",
+                        remaining_count,
+                        destinations.len()
+                    ),
+                )
+            } else {
+                Condition::new(
+                    IN_SYNC,
+                    Some(true),
+                    SUCCESS,
+                    format!(
+                        "successfully removed all {} destination objects",
+                        destinations.len()
+                    ),
+                )
+            };
+            event.update_condition(in_sync_condition);
+            event.update_destinations(remaining);
+            event.replace_status(client).await?;
+            if remaining_count > 0 {
+                return Err(ControllerError::DestinationRemovalError(format!(
+                    "failed to deleted {} out of {} destinations of {}",
+                    remaining_count,
+                    dest_count,
+                    event.id()
+                )));
+            } else {
+                info!(
+                    "successfully deleted all {} destination objects of {}",
+                    dest_count,
+                    event.id()
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn delete(&self, event: &mut ObjectSyncModifications) -> Result<(), ControllerError> {
         // Remove from ResourceController
         self.remove(event).await;
         // Delete all remaining destinations
-        if let Some(destinations) = event
-            .status
-            .as_ref()
-            .map(|v| v.destinations.as_ref())
-            .flatten()
-        {
-            let remaining = delete_destinations(self.client(), destinations).await?;
-            if !remaining.is_empty() {
-                let errors = remaining.len();
-                event.update_destinations(remaining);
-                event.replace_status(self.client()).await?;
-                return Err(ControllerError::DestinationRemovalError(format!(
-                    "failed to remove {} destinations of {}",
-                    errors,
-                    event.id()
-                )));
-            }
-        }
-        info!(
-            "successfully removed all destination objects of {}",
-            event.id()
-        );
+        Self::delete_destinations(self.client(), event).await?;
         // Remove finalizer from source object.
         let gvk = self.get_gvk(&event.spec.source).await?;
         let api_resource = ApiResource::from_gvk(&gvk);
-        let namespace = event
-            .spec
-            .source
-            .namespace
-            .clone()
-            .or(event.namespace())
-            .unwrap_or_else(|| "".to_string());
+        let namespace = event.source_namespace().unwrap_or_else(|| "".to_string());
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client(), namespace.as_str(), &api_resource);
-        match api.get(event.spec.source.name.as_str()).await {
+        match api
+            .get(event.source_name())
+            .await
+            .map(|v| ensure_gvk(v, &gvk))
+        {
             Ok(mut source) => {
-                source.types = source.types.or(Some(TypeMeta {
-                    kind: gvk.kind.clone(),
-                    api_version: gvk.api_version(),
-                }));
                 remove_finalizer(api, &mut source, FINALIZER).await?;
             }
             Err(e) if e.is_not_found() => (),
@@ -301,28 +343,32 @@ impl ObjectSyncController {
         let current_gvk = self.get_gvk(&event.spec.source).await?;
         // Obtain the configuration checksum and immediately release the read lock
         // guard again.
-        let gvk = {
+        let active = {
             let instances = self.instances.read().await;
-            instances.get(&event.id()).map(|v| v.gvk.clone())
+            instances.get(&event.id()).map(|v| v.clone())
         };
-        let condition = if let Some(gvk) = gvk {
-            if gvk != current_gvk {
-                // GVK changed so remove from current ResourceController
+        let condition = if let Some(active) = active {
+            if active.source_changed(event, &current_gvk) {
+                // GVK or source object (name or namespace) changed so remove from current ResourceController
                 self.remove(event).await;
-                // and add it again with its GVK
+                // Cleanup destinations as source changed.
+                Self::delete_destinations(self.client(), event).await?;
+                // and add it again with new GVK and source object
                 self.add(&event, current_gvk.clone()).await?;
                 Some(Condition::new(
                     READY,
                     Some(true),
                     SUCCESS,
                     format!(
-                        "Successfully moved from ResourceController {}/{}/{} to {}/{}/{}",
-                        gvk.group,
-                        gvk.version,
-                        gvk.kind,
+                        "Successfully moved from ResourceController {}/{}/{} to {}/{}/{} and updated source from {} to {}",
+                        active.gvk.group,
+                        active.gvk.version,
+                        active.gvk.kind,
                         current_gvk.group,
                         current_gvk.version,
-                        current_gvk.kind
+                        current_gvk.kind,
+                        active.resource_controller_handle.src,
+                        SourceRef::from(&*event)
                     ),
                 ))
             } else {
@@ -336,8 +382,11 @@ impl ObjectSyncController {
                 Some(true),
                 SUCCESS,
                 format!(
-                    "Successfully registered with ResourceController {}/{}/{}",
-                    current_gvk.group, current_gvk.version, current_gvk.kind
+                    "Successfully registered with ResourceController {}/{}/{} and source {}",
+                    current_gvk.group,
+                    current_gvk.version,
+                    current_gvk.kind,
+                    SourceRef::from(&*event)
                 ),
             ))
         };
