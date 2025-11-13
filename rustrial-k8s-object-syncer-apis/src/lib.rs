@@ -112,6 +112,7 @@ pub struct SourceObject {
 
 /// Destination object synchronization strategy.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(with = "String")]
 pub enum SyncStrategy {
     /// Use [server side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/) to
     /// manage (sync) destination objects with a shared ownership model

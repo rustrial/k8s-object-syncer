@@ -48,16 +48,9 @@ spec:
                         is synced to all namespaces.
                       type: string
                     strategy:
-                      anyOf:
-                      - description: Destination object synchronization strategy.
-                        enum:
-                        - apply
-                        - replace
-                        type: string
-                      - enum:
-                        - null
-                        nullable: true
                       description: The sync strategy to use for this destination, defaults to "apply" (server side apply).
+                      nullable: true
+                      type: string
                   required:
                   - namespace
                   type: object
@@ -163,16 +156,9 @@ spec:
                           type: string
                       type: object
                     strategy:
-                      anyOf:
-                      - description: Destination object synchronization strategy.
-                        enum:
-                        - apply
-                        - replace
-                        type: string
-                      - enum:
-                        - null
-                        nullable: true
                       description: The [`SyncStrategy`] applied to this destination.
+                      nullable: true
+                      type: string
                     syncedVersion:
                       description: The last source version syced, `None` if not yet synced.
                       nullable: true
