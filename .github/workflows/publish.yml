@@ -58,10 +58,10 @@ jobs:
       - publish-oci-images
     strategy:
       matrix:
-        k8s:
-          - v1.30.8
-          - v1.31.4
+        k8s: # Must be available from https://github.com/kubernetes-sigs/kind/releases
           - v1.32.0
+          - v1.33.4
+          - v1.34.0
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -70,13 +70,13 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
-          version: "v3.16.4"
+          version: "v3.19.2"
       - name: Run chart-testing (lint)
         run: (cd charts/k8s-object-syncer && helm lint .)
       - name: Create kind ${{ matrix.k8s }} cluster
         uses: helm/kind-action@v1.12.0
         with:
-          version: "v0.26.0"
+          version: "v0.30.0"
           node_image: kindest/node:${{ matrix.k8s }}
       - name: Install chart
         # No --wait, we do not wait for the Deployment to become ready, as it will not become
@@ -137,7 +137,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          version: "v3.16.4"
+          version: "v3.19.2"
       - name: Install CR
         run: .github/install-cr.sh
       - name: Extract VERSION from GITHUB_REF

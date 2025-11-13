@@ -27,7 +27,9 @@ spec:
         description: Auto-generated derived type for ObjectSyncSpec via `CustomResource`
         properties:
           spec:
-            description: Kubernetes object synchronization specification, defining how a single source object should be replicated and synced to multiple destination objects.
+            description: |-
+              Kubernetes object synchronization specification, defining how a single source
+              object should be replicated and synced to multiple destination objects.
             properties:
               destinations:
                 description: The destinations to sync the source object to.
@@ -35,19 +37,27 @@ spec:
                   description: Synchronization target configuration.
                   properties:
                     name:
-                      description: Optional new name for the destination object, defaults to the name of the source object.
+                      description: |-
+                        Optional new name for the destination object, defaults to the name
+                        of the source object.
                       nullable: true
                       type: string
                     namespace:
-                      description: The destination (target) namespace, if empty `""` or `"*"` the source object is synced to all namespaces.
+                      description: |-
+                        The destination (target) namespace, if empty `""` or `"*"` the source object
+                        is synced to all namespaces.
                       type: string
                     strategy:
+                      anyOf:
+                      - description: Destination object synchronization strategy.
+                        enum:
+                        - apply
+                        - replace
+                        type: string
+                      - enum:
+                        - null
+                        nullable: true
                       description: The sync strategy to use for this destination, defaults to "apply" (server side apply).
-                      enum:
-                      - apply
-                      - replace
-                      nullable: true
-                      type: string
                   required:
                   - namespace
                   type: object
@@ -65,7 +75,9 @@ spec:
                     description: The Kubernetes object's name (`metadata.name`)
                     type: string
                   namespace:
-                    description: The Kubernetes object's namespace (`metadata.namespace`) defaults to the namespace of the `ObjectSync` object.
+                    description: |-
+                      The Kubernetes object's namespace (`metadata.namespace`) defaults to the namespace
+                      of the `ObjectSync` object.
                     nullable: true
                     type: string
                   version:
@@ -118,7 +130,10 @@ spec:
                 nullable: true
                 type: array
               destinations:
-                description: As Kubernetes does not support cross-namespace OwnerReferences and automatic garbage collection of owned objects, we keep track of all synced destination objects in the status sub-resource.
+                description: |-
+                  As Kubernetes does not support cross-namespace OwnerReferences and automatic
+                  garbage collection of owned objects, we keep track of all synced destination
+                  objects in the status sub-resource.
                 items:
                   description: Synchronization target status, used to track synchronized objects.
                   properties:
@@ -148,12 +163,16 @@ spec:
                           type: string
                       type: object
                     strategy:
+                      anyOf:
+                      - description: Destination object synchronization strategy.
+                        enum:
+                        - apply
+                        - replace
+                        type: string
+                      - enum:
+                        - null
+                        nullable: true
                       description: The [`SyncStrategy`] applied to this destination.
-                      enum:
-                      - apply
-                      - replace
-                      nullable: true
-                      type: string
                     syncedVersion:
                       description: The last source version syced, `None` if not yet synced.
                       nullable: true
