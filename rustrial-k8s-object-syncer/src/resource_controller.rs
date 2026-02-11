@@ -12,7 +12,8 @@ use futures::{
     SinkExt, StreamExt,
     channel::mpsc::{Receiver, Sender, channel},
 };
-use k8s_openapi::{api::core::v1::Namespace, chrono::Utc};
+use k8s_openapi::api::core::v1::Namespace;
+use k8s_openapi::jiff::Timestamp;
 use kube::{
     Api, Client, ResourceExt,
     api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams},
@@ -636,7 +637,7 @@ impl ResourceControllerImpl {
         lp_dst.label_selector = Some(format!("app.kubernetes.io/managed-by={}", MANAGER));
         let controller = controller
             .reconcile_all_on(reload)
-            // Watch namespaces to track newly created namespaces.
+            // Watch namespaces to track newly created and deleted namespaces.
             .watches(
                 Api::<Namespace>::all(self.client()),
                 watcher::Config::default(),
@@ -644,18 +645,32 @@ impl ResourceControllerImpl {
                     let is_target_namespace = target_namespaces2
                         .as_ref()
                         .map_or(true, |v| v.contains(namespace.name_any().as_str()));
-                    if let Some(ct) = &namespace.metadata.creation_timestamp {
-                        let age = Utc::now() - ct.0;
-                        if is_target_namespace && age.num_seconds() < 300 {
-                            // reconcile all source if namespace has been created in the last 5 minutes.
-                            let guard = futures::executor::block_on(sources.read());
-                            let tmp: Vec<ObjectRef<DynamicObject>> = guard
-                                .values()
-                                .flatten()
-                                .map(|v| v.object_ref(&api_resource))
-                                .collect();
-                            return tmp;
-                        }
+
+                    if !is_target_namespace {
+                        return vec![];
+                    }
+
+                    // Trigger reconciliation if namespace is being deleted (to remove finalizers
+                    // from synced objects) or if namespace was recently created (to sync objects
+                    // to new namespace).
+                    let should_reconcile = namespace.metadata.deletion_timestamp.is_some()
+                        || namespace
+                            .metadata
+                            .creation_timestamp
+                            .as_ref()
+                            .map_or(false, |ct| {
+                                let now = Timestamp::now();
+                                let age_seconds = now.as_second() - ct.0.as_second();
+                                age_seconds < 300
+                            });
+
+                    if should_reconcile {
+                        let guard = futures::executor::block_on(sources.read());
+                        return guard
+                            .values()
+                            .flatten()
+                            .map(|v| v.object_ref(&api_resource))
+                            .collect();
                     }
                     vec![]
                 },
