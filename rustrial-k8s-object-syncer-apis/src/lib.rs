@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use k8s_openapi::chrono::{SecondsFormat, Utc};
+use k8s_openapi::jiff::Timestamp;
 use kube::{CustomResource, ResourceExt, api::ObjectMeta};
 
 use schemars::JsonSchema;
@@ -326,8 +326,9 @@ impl ObjectSync {
 
 impl ObjectSyncStatus {
     pub fn update_condition(&mut self, mut c: Condition) {
-        let time = Utc::now();
-        c.last_transition_time = Some(time.to_rfc3339_opts(SecondsFormat::Secs, true));
+        let time = Timestamp::now();
+        // Format as RFC 3339 with seconds precision (e.g., "2024-01-15T10:30:00Z")
+        c.last_transition_time = Some(time.strftime("%Y-%m-%dT%H:%M:%SZ").to_string());
         let mut conditions: Vec<Condition> = self.conditions.take().unwrap_or_else(|| vec![]);
         if let Some(existing) = conditions.iter().find(|c| c.type_ == c.type_) {
             if existing.status != c.status
