@@ -330,7 +330,7 @@ impl ObjectSyncStatus {
         // Format as RFC 3339 with seconds precision (e.g., "2024-01-15T10:30:00Z")
         c.last_transition_time = Some(time.strftime("%Y-%m-%dT%H:%M:%SZ").to_string());
         let mut conditions: Vec<Condition> = self.conditions.take().unwrap_or_else(|| vec![]);
-        if let Some(existing) = conditions.iter().find(|c| c.type_ == c.type_) {
+        if let Some(existing) = conditions.iter().find(|existing| existing.type_ == c.type_) {
             if existing.status != c.status
                 || existing.reason != c.reason
                 || existing.message != c.message

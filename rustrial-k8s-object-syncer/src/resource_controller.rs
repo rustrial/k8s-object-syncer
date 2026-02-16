@@ -90,6 +90,9 @@ struct ResourceControllerImpl {
 
 const RESOURCE_CONTROLLER: &'static str = "resource_controller";
 
+/// Interval in seconds for full reconciliation of tracked source objects.
+const FULL_RECONCILE_INTERVAL_SECS: u64 = 300;
+
 impl ResourceControllerImpl {
     pub fn new(
         configuration: Configuration,
@@ -564,7 +567,9 @@ impl ResourceControllerImpl {
                 .record(duration.as_millis() as u64, labels);
             // Requeue objects tracked by ObjectSync configuration to make sure any
             // downstream destination drift is elminitated in an eventual consistent manner.
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(
+                FULL_RECONCILE_INTERVAL_SECS,
+            )))
         } else {
             debug!(
                 "ignoring {} as it is not references by any ObjectSync instance",
@@ -603,7 +608,7 @@ impl ResourceControllerImpl {
         if error.is_temporary() {
             Action::requeue(Duration::from_secs(30))
         } else {
-            Action::requeue(Duration::from_secs(300))
+            Action::requeue(Duration::from_secs(FULL_RECONCILE_INTERVAL_SECS))
         }
     }
 
@@ -661,7 +666,11 @@ impl ResourceControllerImpl {
                             .map_or(false, |ct| {
                                 let now = Timestamp::now();
                                 let age_seconds = now.as_second() - ct.0.as_second();
-                                age_seconds < 300
+                                // Use 3x the full reconcile interval to avoid a race condition
+                                // where a namespace is created right after a reconcile fires and
+                                // ages past the threshold before the next reconcile triggers.
+                                age_seconds
+                                    < (FULL_RECONCILE_INTERVAL_SECS as i64).saturating_mul(3)
                             });
 
                     if should_reconcile {
@@ -705,9 +714,10 @@ impl ResourceControllerImpl {
                         .as_ref()
                         .map_or(true, |v| v.contains(namespace.as_str()));
                     if let Some(annotation) = rs.annotations().get(SOURCE_OBJECT_ANNOTATION) {
-                        let parts: Vec<&str> = annotation.split("/").collect();
+                        // Use splitn to handle potential extra '/' characters defensively.
+                        let parts: Vec<&str> = annotation.splitn(2, "/").collect();
                         match parts.as_slice() {
-                            [ns, name] if is_target_namespace => Some(
+                            [ns, name] if is_target_namespace && !name.is_empty() => Some(
                                 ObjectRef::<DynamicObject>::new_with(name, api_resource3.clone())
                                     .within(ns),
                             ),
