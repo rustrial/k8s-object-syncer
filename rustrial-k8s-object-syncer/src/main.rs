@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
@@ -17,6 +17,7 @@ use rustls::crypto::ring::default_provider;
 use rustrial_k8s_object_syncer_apis::ObjectSync;
 use std::{collections::HashSet, net::SocketAddr};
 use tokio::net::TcpListener;
+use tokio::signal::unix::{SignalKind, signal};
 
 mod object_sync_controller;
 use object_sync_controller::*;
@@ -57,13 +58,34 @@ impl Configuration {
             }
         }
         let watch_namespaces: Option<HashSet<String>> = env_var("WATCH_NAMESPACES")
-            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .map(|v| {
+                normalize(
+                    v.split(",")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                )
+            })
             .flatten();
         let source_namespaces: Option<HashSet<String>> = env_var("SOURCE_NAMESPACES")
-            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .map(|v| {
+                normalize(
+                    v.split(",")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                )
+            })
             .flatten();
         let target_namespaces: Option<HashSet<String>> = env_var("TARGET_NAMESPACES")
-            .map(|v| normalize(v.split(",").map(|v| v.to_string()).collect()))
+            .map(|v| {
+                normalize(
+                    v.split(",")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                )
+            })
             .flatten();
         let mut tmp = watch_namespaces.iter().flatten();
         let object_sync_api = if let (Some(ns), None) = (tmp.next(), tmp.next()) {
@@ -110,7 +132,21 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("failed to set crypto provider: {:?}", e))?;
     let metrics_addr = env_var("METRICS_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0".to_string());
     let metrics_port = env_var("METRICS_LISTEN_PORT").unwrap_or_else(|| "9000".to_string());
-    let metrics_addr: SocketAddr = format!("{}:{}", metrics_addr, metrics_port).parse()?;
+    if metrics_addr.contains(':') {
+        anyhow::bail!(
+            "METRICS_LISTEN_ADDR ('{}') must be a bare IP address without a port suffix. \
+             Set the port via METRICS_LISTEN_PORT instead (current value: '{}').",
+            metrics_addr,
+            metrics_port
+        );
+    }
+    let metrics_addr: SocketAddr = format!("{}:{}", metrics_addr, metrics_port)
+        .parse()
+        .context(format!(
+            "Failed to parse metrics listen address from METRICS_LISTEN_ADDR='{}' \
+             and METRICS_LISTEN_PORT='{}'. Expected a valid IP address and a numeric port.",
+            metrics_addr, metrics_port
+        ))?;
     let registry = prometheus::Registry::new();
     let prometheus_metrics_exporter = opentelemetry_prometheus::exporter()
         .with_registry(registry.clone())
@@ -130,23 +166,68 @@ async fn main() -> anyhow::Result<()> {
     debug!("Listening on http://{}", metrics_addr);
     let prometheus_metrics_exporter = start_prometheus_metrics_server(listener, registry);
     let client = Client::try_default().await?;
+    // Start the namespace reflector first as a background task so the cache
+    // is populated before the controller begins reconciling. Without this,
+    // the controller could see an empty namespace cache on its first reconcile
+    // and incorrectly delete all destination objects (treating them as stale),
+    // only to recreate them moments later once the cache fills.
     let namespace_watcher = watcher::watcher(
         Api::<Namespace>::all(client.clone()),
-        watcher::Config::default(),
+        watcher::Config::default().streaming_lists(),
     );
     let writer: Writer<Namespace> = Default::default();
     let namespace_cache = writer.as_reader();
     let namespace_reflector = reflector(writer, namespace_watcher)
         .applied_objects()
         .try_for_each(ok);
+    let namespace_reflector_handle = tokio::spawn(async move {
+        if let Err(e) = namespace_reflector.await {
+            error!("namespace reflector failed: {}", e);
+        }
+    });
+
+    // Wait for the namespace cache to be populated by the reflector's initial LIST.
+    info!("waiting for namespace cache to be populated ...");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        namespace_cache.wait_until_ready(),
+    )
+    .await
+    .context("timed out after 60s waiting for namespace cache to be populated")?
+    .context("namespace reflector failed before populating the cache")?;
+    info!(
+        "namespace cache ready ({} namespaces cached)",
+        namespace_cache.state().len()
+    );
+
     // ObjectSync controller
     let configuration = Configuration::new(client);
     let controller = ObjectSyncController::new(configuration, namespace_cache).start();
+    let mut sigint =
+        signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
+
     info!("start controllers ...");
     tokio::select! {
-       _ = controller => (),
-       _ = namespace_reflector => (),
-       _ = prometheus_metrics_exporter => (),
+       _ = controller => {
+           bail!("ObjectSync controller exited unexpectedly");
+       },
+       _ = namespace_reflector_handle => {
+           bail!("namespace reflector exited unexpectedly");
+       },
+       result = prometheus_metrics_exporter => {
+           match result {
+               Ok(()) => bail!("prometheus metrics server exited unexpectedly"),
+               Err(e) => return Err(e).context("prometheus metrics server failed"),
+           }
+       },
+       _ = sigint.recv() => {
+           info!("received SIGINT, shutting down gracefully");
+       },
+       _ = sigterm.recv() => {
+           info!("received SIGTERM, shutting down gracefully");
+       },
     };
     Ok(())
 }
