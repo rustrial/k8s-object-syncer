@@ -33,7 +33,9 @@ deploymentAnnotations: {}
 
 deploymentLabels: {}
 
-podSecurityContext: {}
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
   # fsGroup: 2000
 
 securityContext:
