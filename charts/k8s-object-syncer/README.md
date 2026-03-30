@@ -6,7 +6,7 @@
 | `sourceNamespaces`                         | Namespaces allowed to reading source objects from, use `["*"]` for all namespaces. | `["kube-public"]`                                          | no        |
 | `targetNamespaces`                         | Namespaces allowed to creating copies into, use `["*"]` for all namespaces.        | `["*"]` (all namespaces)                                   | no        |
 | `allowedResources`                         | Resources (apiGroups & resources) that the controller is allowed to sync           | `[{"apiGroups": ["*"], resources: ["*"]}]` (all resources) | no        |
-| `logLevel`                                 | Log level on of `error`, `info`, `debug` or `trace`                                | `info`                                                     | no        |
+| `logLevel`                                 | `RUST_LOG` directive; supports per-crate filters (e.g. `info,kube=warn`)           | `info,kube=warn,kube_client=warn,kube_runtime=warn,tower=warn,hyper=warn,h2=warn` | no        |
 | `replicaCount`                             | HA is not yet supported (no leader election), so only `1` makes sense.             | `1`                                                        | no        |
 | `image.repository`                         |                                                                                    | `rustrial/k8s-object-syncer`                               | no        |
 | `image.pullPolicy`                         |                                                                                    | `IfNotPresent`                                             | no        |

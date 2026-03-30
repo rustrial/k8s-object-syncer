@@ -90,6 +90,8 @@ allowedResources:
   - apiGroups: ["*"]
     resources: ["*"]
 
+logLevel: "info,kube=warn,kube_client=warn,kube_runtime=warn,tower=warn,hyper=warn,h2=warn"
+
 extraEnv: []
 
 metrics:
