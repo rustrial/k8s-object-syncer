@@ -186,19 +186,15 @@ pub(crate) async fn remove_finalizer<T>(
 where
     T: Clone + std::fmt::Debug + Serialize + DeserializeOwned + Resource,
 {
-    let original = source.clone();
-    let finalizers = source.finalizers_mut();
-    let len = finalizers.len();
-    finalizers.retain(|f| f != finalizer);
-    if finalizers.len() != len {
+    let original_finalizers = source.finalizers().to_vec();
+    let before = serde_json::to_value(&*source)?;
+    source.finalizers_mut().retain(|f| f != finalizer);
+    if source.finalizers().len() != original_finalizers.len() {
         // Use JSON Patch as server-side apply would not remove the finalizer on destination objects.
         // This is because for removal of array elements the fieldManager must be set properly, which
         // is not the case for destinations objects created by `create` or `replace` API calls which
         // do not set the fieldManager properly (as of Kubernetes 1.19).
-        let patch = diff(
-            &serde_json::to_value(&original)?,
-            &serde_json::to_value(&source)?,
-        );
+        let patch = diff(&before, &serde_json::to_value(&*source)?);
         match api
             .patch(
                 source.name_any().as_str(),
@@ -214,7 +210,12 @@ where
         {
             Ok(_) => (),
             Err(e) if e.is_not_found() => (),
-            Err(e) => Err(e)?,
+            Err(e) => {
+                // Restore in-memory state so the caller does not see a
+                // stale finalizer list when the API call failed.
+                *source.finalizers_mut() = original_finalizers;
+                return Err(e.into());
+            }
         }
         Ok(true)
     } else {
