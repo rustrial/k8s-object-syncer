@@ -68,7 +68,7 @@ impl ObjectSyncInstance {
         let new_source_namespace = new.source_namespace();
         self.gvk != *gvk
             || old_src.name != new.spec.source.name
-            || Some(old_src.namespace.as_ref()) != new_source_namespace.as_deref()
+            || old_src.namespace.as_str() != new_source_namespace.as_deref().unwrap_or("")
     }
 }
 
@@ -93,6 +93,7 @@ pub(crate) struct ObjectSyncController {
 
     reconcile_object_sync_count: Counter<u64>,
     reconcile_object_sync_duration: Histogram<u64>,
+    reconcile_object_sync_errors: Counter<u64>,
 }
 
 impl ObjectSyncController {
@@ -105,7 +106,11 @@ impl ObjectSyncController {
         let reconcile_object_sync_duration = meter
             .u64_histogram(metric_name("reconcile_duration_ms"))
             .with_description("Reconcile duration of ObjectSync objects in milliseconds")
-            .with_unit("ns")
+            .with_unit("ms")
+            .build();
+        let reconcile_object_sync_errors = meter
+            .u64_counter(metric_name("reconcile_errors"))
+            .with_description("Count of reconcile invocation errors for ObjectSync resources")
             .build();
         Self {
             namespace_cache,
@@ -114,6 +119,7 @@ impl ObjectSyncController {
             instances: Default::default(),
             reconcile_object_sync_count,
             reconcile_object_sync_duration,
+            reconcile_object_sync_errors,
         }
     }
 
@@ -124,12 +130,17 @@ impl ObjectSyncController {
         let client = self.client();
         let group = source.group.as_str();
         let kind = source.kind.as_str();
-        let apigroup = discovery::group(&client, group).await.map_err(|e| {
-            ControllerError::ApiDiscoveryError(format!(
-                "failed to discover detail information for API Group {}: {}",
-                group, e
-            ))
-        })?;
+        let apigroup = discovery::group(&client, group)
+            .await
+            .map_err(|e| match &e {
+                // Permanent error, Group is invalid or no longer exists.
+                kube::Error::Discovery(_) => ControllerError::ApiDiscoveryError(format!(
+                    "API discovery failed for group {}: {}",
+                    group, e
+                )),
+                // Temporary errors
+                _ => ControllerError::from(e),
+            })?;
         let (api_resource, cap) = match &source.version {
             Some(version) => apigroup
                 .recommended_resources()
@@ -231,12 +242,14 @@ impl ObjectSyncController {
                     self.configuration.clone(),
                     self.namespace_cache.clone(),
                     gvk.clone(),
-                )
-                .await?;
+                )?;
                 let controller = Arc::new(controller);
                 controllers.insert(gvk.clone(), Arc::downgrade(&controller));
                 controller
             };
+            // Explicitly drop the RwLockWriteGuard to the controllers map, to
+            // make sure we don't hold the lock across await points.
+            drop(controllers);
             (controller.register(event).await, controller.clone())
         };
         let mut instances = self.instances.write().await;
@@ -311,21 +324,34 @@ impl ObjectSyncController {
         self.remove(event).await;
         // Delete all remaining destinations
         Self::delete_destinations(self.client(), event).await?;
-        // Remove finalizer from source object.
-        let gvk = self.get_gvk(&event.spec.source).await?;
-        let api_resource = ApiResource::from_gvk(&gvk);
-        let namespace = event.source_namespace().unwrap_or_else(|| "".to_string());
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(self.client(), namespace.as_str(), &api_resource);
-        match api
-            .get(event.source_name())
-            .await
-            .map(|v| ensure_gvk(v, &gvk))
-        {
-            Ok(mut source) => {
-                remove_finalizer(api, &mut source, FINALIZER).await?;
+        // Best-effort: remove finalizer from source object if the API is still available.
+        // If the source CRD has been removed, skip this step so the ObjectSync finalizer
+        // removal below can still proceed (otherwise we'd be stuck retrying forever).
+        match self.get_gvk(&event.spec.source).await {
+            Ok(gvk) => {
+                let api_resource = ApiResource::from_gvk(&gvk);
+                let namespace = event.source_namespace().unwrap_or_else(|| "".to_string());
+                let api: Api<DynamicObject> =
+                    Api::namespaced_with(self.client(), namespace.as_str(), &api_resource);
+                match api
+                    .get(event.source_name())
+                    .await
+                    .map(|v| ensure_gvk(v, &gvk))
+                {
+                    Ok(mut source) => {
+                        remove_finalizer(api, &mut source, FINALIZER).await?;
+                    }
+                    Err(e) if e.is_not_found() => (),
+                    Err(e) => Err(e)?,
+                }
             }
-            Err(e) if e.is_not_found() => (),
+            Err(ControllerError::ApiDiscoveryError(msg)) => {
+                info!(
+                    "source CRD for {} no longer exists, source objects already removed by API server: {}",
+                    event.id(),
+                    msg
+                );
+            }
             Err(e) => Err(e)?,
         }
         // Remove finalizer from ObjectSync object.
@@ -456,40 +482,35 @@ impl ObjectSyncController {
     }
 
     pub fn start(self) -> impl Future<Output = ()> {
+        let reconcile_errors = self.reconcile_object_sync_errors.clone();
         let controller =
             Controller::new(self.configuration.resource_sync.clone(), Config::default());
         let controller = controller
             .run(Self::reconcile, Self::error_policy, Arc::new(self))
-            .for_each(|res| async move {
-                match res {
-                    Ok(o) => {
-                        //counter!("reconcile_k8s_resource_sync_success", 1);
-                        debug!("reconciled {:?}", o);
-                    }
-                    Err(e) => {
-                        let meter: Meter = global::meter(OBJECT_SYNC_CONTROLLER);
-                        let reconcile_object_sync_errors = meter
-                            .u64_counter(metric_name("reconcile_errors"))
-                            .with_description(
-                                "Count of reconcile invocation errors for ObjectSync resources",
-                            )
-                            .build();
-                        let labels = &[];
-                        match e {
-                            a @ kube_runtime::controller::Error::QueueError { .. } => {
-                                debug!("reconcile failed: {:?}", a);
-                                reconcile_object_sync_errors.add(1, labels);
-                                // Slow down on errors caused by missing CRDs or permissions.
-                                sleep(Duration::from_secs(30)).await;
-                            }
-                            a @ kube_runtime::controller::Error::ObjectNotFound { .. } => {
-                                debug!("reconcile failed: {:?}", a);
-                            }
-                            e => {
-                                warn!("reconcile failed: {:?}", e);
-                                reconcile_object_sync_errors.add(1, labels);
-                            }
-                        };
+            .for_each(move |res| {
+                let reconcile_errors = reconcile_errors.clone();
+                async move {
+                    match res {
+                        Ok(o) => {
+                            debug!("reconciled {:?}", o);
+                        }
+                        Err(e) => {
+                            match e {
+                                a @ kube_runtime::controller::Error::QueueError { .. } => {
+                                    debug!("reconcile failed: {:?}", a);
+                                    reconcile_errors.add(1, &[]);
+                                    // Slow down on errors caused by missing CRDs or permissions.
+                                    sleep(Duration::from_secs(30)).await;
+                                }
+                                a @ kube_runtime::controller::Error::ObjectNotFound { .. } => {
+                                    debug!("reconcile failed: {:?}", a);
+                                }
+                                e => {
+                                    warn!("reconcile failed: {:?}", e);
+                                    reconcile_errors.add(1, &[]);
+                                }
+                            };
+                        }
                     }
                 }
             });

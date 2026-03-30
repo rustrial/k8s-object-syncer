@@ -34,16 +34,14 @@ use rustrial_k8s_object_syncer_apis::{
     SOURCE_OBJECT_ANNOTATION, SyncStrategy,
 };
 use std::{
-    borrow::BorrowMut,
     collections::{HashMap, HashSet},
     future::Future,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Instant,
 };
 use tokio::{
     spawn,
-    sync::{Mutex, RwLock},
     task::JoinHandle,
     time::{Duration, sleep},
 };
@@ -56,23 +54,15 @@ pub struct ObjectSyncHandle {
     crd: ObjectSyncRef,
 }
 
-impl ObjectSyncHandle {
-    /// Basically, that is the AsyncDrop impl, but Rust does not yet support
-    /// AsyncDrop and we will call this from Drop impl.
-    async fn async_drop(&mut self) {
-        let mut guard = self.sources.write().await;
+impl Drop for ObjectSyncHandle {
+    fn drop(&mut self) {
+        let mut guard = self.sources.write().expect("sources RwLock poisoned");
         if let Some(crds) = guard.get_mut(&self.src) {
             crds.remove(&self.crd);
             if crds.is_empty() {
                 guard.remove(&self.src);
             }
         }
-    }
-}
-
-impl Drop for ObjectSyncHandle {
-    fn drop(&mut self) {
-        futures::executor::block_on(self.async_drop())
     }
 }
 
@@ -86,6 +76,7 @@ struct ResourceControllerImpl {
     sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
     resource_reconcile_count: Counter<u64>,
     resource_reconcile_duration: Histogram<u64>,
+    resource_reconcile_errors: Counter<u64>,
 }
 
 const RESOURCE_CONTROLLER: &'static str = "resource_controller";
@@ -109,7 +100,11 @@ impl ResourceControllerImpl {
         let resource_reconcile_duration = meter
             .u64_histogram(metric_name("resource_reconcile_duration_ms"))
             .with_description("Resource specific reconciliation duration in milliseconds")
-            .with_unit("ns")
+            .with_unit("ms")
+            .build();
+        let resource_reconcile_errors = meter
+            .u64_counter(metric_name("resource_reconcile_errors"))
+            .with_description("Count of reconcile invocation errors for generic resources")
             .build();
         Self {
             configuration,
@@ -119,6 +114,7 @@ impl ResourceControllerImpl {
             sources,
             resource_reconcile_count,
             resource_reconcile_duration,
+            resource_reconcile_errors,
         }
     }
 
@@ -197,14 +193,20 @@ impl ResourceControllerImpl {
         let mut pp = PostParams::default();
         pp.field_manager = Some(MANAGER.to_string());
 
-        let expected_success = destinations.len();
+        let expected_success = destinations
+            .iter()
+            .filter(|d| {
+                !stale_remnants
+                    .iter()
+                    .any(|v| Self::is_same_destination(v, d))
+            })
+            .count();
         let mut observed_success = 0usize;
         for d in destinations {
             // Skip over remnants (stale destinations for which deletion failed).
             if stale_remnants
                 .iter()
-                .find(|v| Self::is_same_destination(v, d))
-                .is_some()
+                .any(|v| Self::is_same_destination(v, d))
             {
                 continue;
             }
@@ -330,6 +332,12 @@ impl ResourceControllerImpl {
                         break;
                     }
                 }
+            }
+            if retry_attempts == 0 {
+                warn!(
+                    "exhausted retries for destination {} {}/{}",
+                    self.gvk.kind, d.namespace, d.name
+                );
             }
         }
         Ok((changed, expected_success, observed_success))
@@ -471,7 +479,7 @@ impl ResourceControllerImpl {
         // Get ObjectSync object names that reference this object if
         // the objct resides in on of the tracked source namespaces.
         let refs = if is_source_namespace {
-            let guard = self.sources.read().await;
+            let guard = self.sources.read().expect("sources RwLock poisoned");
             guard.get(&source_ref).cloned()
         } else {
             None
@@ -521,22 +529,28 @@ impl ResourceControllerImpl {
                 KeyValue::new("object_namespace", source_ref.namespace.clone()),
             ];
             if source.metadata.deletion_timestamp.is_some() {
+                let mut all_succeeded = true;
                 for mut sync_configuration in sync_configurations {
-                    let mut errors = 0;
-                    if let Err(_) = me.source_deleted(&mut sync_configuration).await {
-                        errors += 1;
+                    if let Err(e) = me.source_deleted(&mut sync_configuration).await {
+                        error!(
+                            "failed to delete destinations for {} of {}: {}",
+                            source_id,
+                            sync_configuration.id(),
+                            e
+                        );
+                        all_succeeded = false;
                     }
+                }
 
-                    if errors == 0 {
-                        if let Err(e) = remove_finalizer(
-                            me.namespaced_api(source_ref.namespace.as_str()),
-                            &mut source,
-                            FINALIZER,
-                        )
-                        .await
-                        {
-                            error!("failed to remove finalizer from {}: {}", source_id, e);
-                        }
+                if all_succeeded {
+                    if let Err(e) = remove_finalizer(
+                        me.namespaced_api(source_ref.namespace.as_str()),
+                        &mut source,
+                        FINALIZER,
+                    )
+                    .await
+                    {
+                        error!("failed to remove finalizer from {}: {}", source_id, e);
                     }
                 }
             } else {
@@ -623,10 +637,7 @@ impl ResourceControllerImpl {
         }
     }
 
-    pub async fn start(
-        self,
-        reload: Receiver<()>,
-    ) -> Result<impl Future<Output = ()>, ControllerError> {
+    pub fn start(self, reload: Receiver<()>) -> Result<impl Future<Output = ()>, ControllerError> {
         let target_namespaces = self.configuration.target_namespaces.clone();
         let target_namespaces2 = target_namespaces.clone();
         let api_resource = self.api_resource.clone();
@@ -634,18 +645,18 @@ impl ResourceControllerImpl {
         let api_resource3 = self.api_resource.clone();
         let src_api = self.api(&self.configuration.source_namespaces);
         let dst_api = self.api(&self.configuration.target_namespaces);
-        let config = Config::default();
+        let config = Config::default().streaming_lists();
         let controller = Controller::new_with(src_api, config, self.api_resource.clone());
         let sources = self.sources.clone();
         let sources2 = sources.clone();
-        let mut lp_dst = watcher::Config::default();
+        let mut lp_dst = watcher::Config::default().streaming_lists();
         lp_dst.label_selector = Some(format!("app.kubernetes.io/managed-by={}", MANAGER));
         let controller = controller
             .reconcile_all_on(reload)
             // Watch namespaces to track newly created and deleted namespaces.
             .watches(
                 Api::<Namespace>::all(self.client()),
-                watcher::Config::default(),
+                watcher::Config::default().streaming_lists(),
                 move |namespace| {
                     let is_target_namespace = target_namespaces2
                         .as_ref()
@@ -674,7 +685,7 @@ impl ResourceControllerImpl {
                             });
 
                     if should_reconcile {
-                        let guard = futures::executor::block_on(sources.read());
+                        let guard = sources.read().expect("sources RwLock poisoned");
                         return guard
                             .values()
                             .flatten()
@@ -687,10 +698,10 @@ impl ResourceControllerImpl {
             // Watch ObjectSync objects, to track destination changes.
             .watches(
                 self.configuration.resource_sync.clone(),
-                watcher::Config::default(),
+                watcher::Config::default().streaming_lists(),
                 move |rs| {
                     let object_sync_ref = ObjectSyncRef::from(&rs);
-                    let guard = futures::executor::block_on(sources2.read());
+                    let guard = sources2.read().expect("sources RwLock poisoned");
                     let affected: Vec<ObjectRef<DynamicObject>> = guard
                         .values()
                         .flatten()
@@ -727,34 +738,32 @@ impl ResourceControllerImpl {
                         None
                     }
                 },
-            )
+            );
+        let reconcile_errors = self.resource_reconcile_errors.clone();
+        let controller = controller
             .run(Self::reconcile, Self::error_policy, Arc::new(self))
-            .for_each(|res| async move {
-                match res {
-                    Ok(_o) => {}
-                    Err(e) => {
-                        let meter: Meter = global::meter(RESOURCE_CONTROLLER);
-                        let reconcile_kind_errors = meter
-                            .u64_counter(metric_name("resource_reconcile_errors"))
-                            .with_description(
-                                "Count of reconcile invocation errors for generic resources",
-                            )
-                            .build();
-                        match e {
-                            a @ kube_runtime::controller::Error::QueueError { .. } => {
-                                debug!("reconcile failed: {:?}", a);
-                                reconcile_kind_errors.add(1, &[]);
-                                // Slow down on errors caused by missing CRDs or permissions.
-                                sleep(Duration::from_secs(30)).await;
-                            }
-                            a @ kube_runtime::controller::Error::ObjectNotFound { .. } => {
-                                debug!("reconcile failed: {:?}", a);
-                            }
-                            e => {
-                                warn!("reconcile failed: {:?}", e);
-                                reconcile_kind_errors.add(1, &[]);
-                            }
-                        };
+            .for_each(move |res| {
+                let reconcile_errors = reconcile_errors.clone();
+                async move {
+                    match res {
+                        Ok(_o) => {}
+                        Err(e) => {
+                            match e {
+                                a @ kube_runtime::controller::Error::QueueError { .. } => {
+                                    debug!("reconcile failed: {:?}", a);
+                                    reconcile_errors.add(1, &[]);
+                                    // Slow down on errors caused by missing CRDs or permissions.
+                                    sleep(Duration::from_secs(30)).await;
+                                }
+                                a @ kube_runtime::controller::Error::ObjectNotFound { .. } => {
+                                    debug!("reconcile failed: {:?}", a);
+                                }
+                                e => {
+                                    warn!("reconcile failed: {:?}", e);
+                                    reconcile_errors.add(1, &[]);
+                                }
+                            };
+                        }
                     }
                 }
             });
@@ -770,7 +779,7 @@ pub(crate) struct ResourceController {
     sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>>,
     /// The handle to the effective controller, needed to stop (abort) it.
     join_handle: JoinHandle<()>,
-    reload_sender: Mutex<Sender<()>>,
+    reload_sender: Sender<()>,
 }
 
 impl Drop for ResourceController {
@@ -784,7 +793,7 @@ impl Drop for ResourceController {
 }
 
 impl ResourceController {
-    pub async fn new(
+    pub fn new(
         config: Configuration,
         namespace_cache: Store<Namespace>,
         gvk: GroupVersionKind,
@@ -793,12 +802,12 @@ impl ResourceController {
         let sources: Arc<RwLock<HashMap<SourceRef, HashSet<ObjectSyncRef>>>> = Default::default();
         let inner =
             ResourceControllerImpl::new(config, namespace_cache, gvk.clone(), sources.clone());
-        let join_handle = spawn(inner.start(reload_receiver).await?);
+        let join_handle = spawn(inner.start(reload_receiver)?);
         let me = Self {
             gvk,
             sources,
             join_handle,
-            reload_sender: Mutex::new(reload_sender),
+            reload_sender,
         };
         Ok(me)
     }
@@ -807,7 +816,7 @@ impl ResourceController {
         let src_name = SourceRef::from(event);
         let crd_name = ObjectSyncRef::from(event.deref());
         {
-            let mut guard = self.sources.write().await;
+            let mut guard = self.sources.write().expect("sources RwLock poisoned");
             match guard.get_mut(&src_name) {
                 Some(s) => {
                     s.insert(crd_name.clone());
@@ -820,7 +829,8 @@ impl ResourceController {
             }
         }
         // Now trigger reconciliation
-        if let Err(e) = self.reload_sender.lock().await.borrow_mut().send(()).await {
+        let mut sender = self.reload_sender.clone();
+        if let Err(e) = sender.send(()).await {
             error!("{}", e)
         }
         ObjectSyncHandle {
