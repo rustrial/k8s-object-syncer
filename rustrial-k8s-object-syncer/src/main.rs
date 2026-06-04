@@ -2,7 +2,7 @@
 extern crate log;
 
 use anyhow::{Context, anyhow, bail};
-use futures::TryStreamExt;
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
 use kube_runtime::{
@@ -121,10 +121,6 @@ fn env_var(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-async fn ok<T, E>(_: T) -> Result<(), E> {
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -179,12 +175,17 @@ async fn main() -> anyhow::Result<()> {
     let namespace_cache = writer.as_reader();
     let namespace_reflector = reflector(writer, namespace_watcher)
         .applied_objects()
-        .try_for_each(ok);
-    let namespace_reflector_handle = tokio::spawn(async move {
-        if let Err(e) = namespace_reflector.await {
-            error!("namespace reflector failed: {}", e);
-        }
-    });
+        .filter_map(|event| async move {
+            match event {
+                Ok(obj) => Some(obj),
+                Err(e) => {
+                    error!("namespace reflector failed: {}, will retry watching", e);
+                    None
+                }
+            }
+        })
+        .for_each(|_| futures::future::ready(()));
+    let namespace_reflector_handle = tokio::spawn(namespace_reflector);
 
     // Wait for the namespace cache to be populated by the reflector's initial LIST.
     info!("waiting for namespace cache to be populated ...");
