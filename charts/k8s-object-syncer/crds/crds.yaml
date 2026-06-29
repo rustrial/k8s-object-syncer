@@ -13,7 +13,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Whether ObjectSync is ready or not. It is considered ready if there were no errors while synchronizing the resource.
+    - description: >-
+        Whether ObjectSync is ready or not. It is considered ready if there were no
+        errors while synchronizing the resource.
       jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -48,7 +50,9 @@ spec:
                         is synced to all namespaces.
                       type: string
                     strategy:
-                      description: The sync strategy to use for this destination, defaults to "apply" (server side apply).
+                      description: >-
+                        The sync strategy to use for this destination, defaults to "apply" (server side
+                        apply).
                       nullable: true
                       type: string
                   required:
@@ -91,22 +95,37 @@ spec:
             properties:
               conditions:
                 items:
-                  description: We maintain our own copy of Condition as the one from k8s_openapi does not implement JsonSchema.
+                  description: >-
+                    We maintain our own copy of Condition as the one from k8s_openapi does not
+                    implement JsonSchema.
                   properties:
                     lastTransitionTime:
-                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      description: >-
+                        lastTransitionTime is the last time the condition transitioned from one status
+                        to another. This should be when the underlying condition changed.  If that is not
+                        known, then using the time when the API field changed is acceptable.
                       nullable: true
                       type: string
                     message:
-                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      description: >-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
                       type: string
                     observedGeneration:
-                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions\[x\].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      description: >-
+                        observedGeneration represents the .metadata.generation that the condition was
+                        set based upon. For instance, if .metadata.generation is currently 12, but the
+                        .status.conditions\[x\].observedGeneration is 9, the condition is out of date with
+                        respect to the current state of the instance.
                       format: int64
                       nullable: true
                       type: integer
                     reason:
-                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      description: >-
+                        reason contains a programmatic identifier indicating the reason for the
+                        condition's last transition. Producers of specific condition types may define expected
+                        values and meanings for this field, and whether the values are considered a
+                        guaranteed API. The value should be a CamelCase string. This field may not be empty.
                       type: string
                     status:
                       description: status of the condition, one of True, False, Unknown.
