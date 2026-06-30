@@ -57,9 +57,9 @@ jobs:
     strategy:
       matrix:
         k8s: # Must be available from https://github.com/kubernetes-sigs/kind/releases
-          - v1.33.7
-          - v1.34.3
-          - v1.35.0
+          - v1.34.8
+          - v1.35.5
+          - v1.36.1
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -68,13 +68,13 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: "v4.1.3"
+          version: "v4.2.2"
       - name: Run chart-testing (lint)
         run: (cd charts/k8s-object-syncer && helm lint .)
       - name: Create kind ${{ matrix.k8s }} cluster
         uses: helm/kind-action@v1.14.0
         with:
-          version: "v0.31.0"
+          version: "v0.32.0"
           node_image: kindest/node:${{ matrix.k8s }}
       - name: Install chart
         # No --wait, we do not wait for the Deployment to become ready, as it will not become
@@ -134,7 +134,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
-          version: "v4.1.3"
+          version: "v4.2.2"
       - name: Install CR
         run: .github/install-cr.sh
       - name: Extract VERSION from GITHUB_REF

@@ -8,15 +8,15 @@ license = "Unlicense OR MIT OR Apache-2.0"
 
 [dependencies]
 kube = { workspace = true }
-k8s-openapi = { workspace = true, features = ["v1_35", "schemars"] }
+k8s-openapi = { workspace = true, features = ["v1_36", "schemars"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # schemars version must match the one from kube
 schemars = "^1.2.1"
-serde_yaml_ng = "0.10"
+serde-saphyr = "0.0.28"
 
 [dev-dependencies]
 k8s-openapi = { workspace = true, default-features = false, features = [
-    "v1_35",
+    "v1_36",
     "schemars",
 ] }

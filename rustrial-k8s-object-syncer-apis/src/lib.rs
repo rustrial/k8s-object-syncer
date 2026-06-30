@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::jiff::Timestamp;
-use kube::{CustomResource, ResourceExt, api::ObjectMeta};
+use kube::{CustomResource, ResourceExt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
